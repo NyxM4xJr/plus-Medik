@@ -115,7 +115,7 @@ export async function persistObservedProvenance(
   supabase: SupabaseClient,
   provenance: KapsoProvenance,
   pauseMinutes: number,
-): Promise<{ persisted: boolean; duplicate?: boolean }> {
+): Promise<{ persisted: boolean; duplicate?: boolean; conversationId?: string }> {
   if (
     provenance.kind === 'unknown' ||
     provenance.kind === 'lifecycle'
@@ -126,11 +126,13 @@ export async function persistObservedProvenance(
   const conversationId = await upsertConversation(supabase, provenance.message);
   const inserted = await insertMessage(supabase, conversationId, provenance.message);
 
-  if (inserted === 'duplicate') return { persisted: true, duplicate: true };
+  if (inserted === 'duplicate') {
+    return { persisted: true, duplicate: true, conversationId };
+  }
 
   if (provenance.kind === 'human_outbound') {
     await applyObservedHumanTakeover(supabase, conversationId, provenance.message, pauseMinutes);
   }
 
-  return { persisted: true, duplicate: false };
+  return { persisted: true, duplicate: false, conversationId };
 }

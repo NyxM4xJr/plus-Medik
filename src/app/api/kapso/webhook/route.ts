@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { resolveAgentGate } from '@/lib/agent/gate';
 import { getServerEnv } from '@/lib/env';
 import { parseKapsoProvenance } from '@/lib/kapso/provenance';
 import { claimWebhookEvent, markWebhookEvent, persistObservedProvenance } from '@/lib/observer/store';
@@ -43,7 +44,7 @@ export async function POST(request: Request): Promise<Response> {
     });
 
     if (claim === 'duplicate') {
-      return NextResponse.json({ ok: true, duplicate: true }, { status: 200 });
+      return NextResponse.json({ ok: true, duplicate: true, agent_gate: null }, { status: 200 });
     }
 
     const provenance = parseKapsoProvenance(eventName, payload);
@@ -53,6 +54,14 @@ export async function POST(request: Request): Promise<Response> {
       env.HUMAN_TAKEOVER_PAUSE_MINUTES,
     );
 
+    const agentGate =
+      provenance.kind === 'customer_inbound' &&
+      result.persisted &&
+      !result.duplicate &&
+      result.conversationId
+        ? await resolveAgentGate(supabase, result.conversationId)
+        : null;
+
     await markWebhookEvent(supabase, idempotencyKey, 'processed');
 
     return NextResponse.json(
@@ -61,6 +70,7 @@ export async function POST(request: Request): Promise<Response> {
         kind: provenance.kind,
         persisted: result.persisted,
         duplicate_message: result.duplicate ?? false,
+        agent_gate: agentGate,
       },
       { status: 200 },
     );
