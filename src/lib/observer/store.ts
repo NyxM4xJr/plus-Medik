@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { ReferralAttribution } from '@/lib/attribution/referral';
 import type { KapsoProvenance, ObservedMessage } from '@/lib/kapso/provenance';
 
 export async function claimWebhookEvent(
@@ -135,4 +136,34 @@ export async function persistObservedProvenance(
   }
 
   return { persisted: true, duplicate: false, conversationId };
+}
+
+/**
+ * Guarda la atribución de un mensaje entrante.
+ * El índice único por provider_message_id evita duplicados ante reintentos.
+ */
+export async function insertConversationAttribution(
+  supabase: SupabaseClient,
+  input: {
+    conversationId: string;
+    providerMessageId: string | null;
+    observedAt: string;
+    attribution: ReferralAttribution;
+  },
+): Promise<'inserted' | 'duplicate'> {
+  const { error } = await supabase.from('conversation_attributions').insert({
+    agent_conversation_id: input.conversationId,
+    provider_message_id: input.providerMessageId,
+    source_type: input.attribution.sourceType,
+    source_platform: input.attribution.sourcePlatform,
+    source_id: input.attribution.sourceId,
+    source_url: input.attribution.sourceUrl,
+    ctwa_clid: input.attribution.ctwaClid,
+    raw_referral: input.attribution.rawReferral,
+    observed_at: input.observedAt,
+  });
+
+  if (!error) return 'inserted';
+  if (error.code === '23505') return 'duplicate';
+  throw new Error(`conversation_attributions.insert: ${error.message}`);
 }

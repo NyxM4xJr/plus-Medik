@@ -1,8 +1,14 @@
 import { NextResponse } from 'next/server';
 import { resolveAgentGate } from '@/lib/agent/gate';
+import { extractReferralAttribution } from '@/lib/attribution/referral';
 import { getServerEnv } from '@/lib/env';
 import { parseKapsoProvenance } from '@/lib/kapso/provenance';
-import { claimWebhookEvent, markWebhookEvent, persistObservedProvenance } from '@/lib/observer/store';
+import {
+  claimWebhookEvent,
+  insertConversationAttribution,
+  markWebhookEvent,
+  persistObservedProvenance,
+} from '@/lib/observer/store';
 import { verifyKapsoSignature } from '@/lib/security/webhook-signature';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
@@ -53,6 +59,31 @@ export async function POST(request: Request): Promise<Response> {
       provenance,
       env.HUMAN_TAKEOVER_PAUSE_MINUTES,
     );
+
+    if (
+      provenance.kind === 'customer_inbound' &&
+      result.persisted &&
+      !result.duplicate &&
+      result.conversationId
+    ) {
+      // La atribución es secundaria: nunca debe afectar gate, takeover ni envíos.
+      try {
+        const attribution = extractReferralAttribution(payload);
+        if (attribution) {
+          await insertConversationAttribution(supabase, {
+            conversationId: result.conversationId,
+            providerMessageId: provenance.message.providerMessageId,
+            observedAt: provenance.message.messageTimestamp,
+            attribution,
+          });
+        }
+      } catch (error) {
+        console.error('conversation_attribution_failed', {
+          event: eventName,
+          reason: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+    }
 
     const agentGate =
       provenance.kind === 'customer_inbound' &&
