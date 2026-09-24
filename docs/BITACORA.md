@@ -101,6 +101,48 @@ a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
 
 ## Registro
 
+### 2026-09-24 — Primer tráfico real con la fase 1
+
+- Entre 08:22 y 08:27 UTC llegaron mensajes reales procesados con el código
+  nuevo: 4 textos seguidos quedaron en un bloque (`#1`–`#4`) y se cerró con
+  `human_outbound` al responder una persona; un mensaje aislado cerró por
+  `gap`. Los mensajes humanos quedan sin bloque, como corresponde.
+- Kapso **sí envía** `sha256` y `file_size` (confirmado en un audio entrante).
+- Ese tráfico lo procesó el despliegue anterior (Vercel de `rochayoan`, que
+  se redesplegó con el push a su `main`): el proyecto nuevo
+  `lab-whatsapp-agent.vercel.app` recién respondió bien a las 09:17 UTC.
+  Mientras Kapso tenga webhooks hacia ambos, los dos procesan; el reclamo de
+  eventos evita duplicados. Confirmar cuál recibe con `vercel logs` (POST 200).
+- El catálogo está **vacío**: `lab_tests` y `lab_test_aliases` con 0 filas.
+  Bloquea la detección de exámenes y las cotizaciones.
+- Se borraron de Vercel las 4 variables opcionales vacías; producción usa los
+  defaults (60 / 600 / 120 / `true`). `TEST_PHONE` existe en Vercel pero el
+  código no la usa.
+
+### 2026-09-24 — Variables vacías en Vercel: todos los webhooks daban 500
+
+- Síntoma: `POST /api/kapso/webhook` sin firma respondía **500** en lugar de
+  401. `GET` respondía 405 (la ruta existía).
+- Causa: las 8 variables estaban creadas en Vercel pero con valor vacío. En
+  los logs (`vercel logs --status-code 500 --expand`) aparece un `ZodError`
+  con `SUPABASE_URL: Invalid URL`, `too_small` en las demás y números en 0.
+- Detalle: los defaults de `env.ts` usan `??`, que no cubre la cadena vacía.
+  Una variable opcional creada vacía **no** toma su default: rompe el arranque.
+  Si no se usa, se borra en lugar de dejarla vacía.
+- Verificación rápida tras cualquier cambio de variables (y redeploy):
+  `POST` sin firma debe responder **401** `invalid_signature`.
+
+### 2026-09-24 — Repositorio y despliegue propios
+
+- Repositorio principal: `NyxM4x/lab-whatsapp-agent` (privado), con todo el
+  historial. En el clon local es el remoto `origin`; el repo original
+  `rochayoan/lab-whatsapp-agent` queda como remoto `rochayoan`.
+- El despliegue de producción pasa a un proyecto de Vercel en la cuenta
+  propia, conectado a `NyxM4x/lab-whatsapp-agent` (rama `main`).
+- Al cambiar de despliegue hay que mover la URL del webhook en Kapso al nuevo
+  dominio. Si Kapso sigue apuntando al despliegue anterior, el nuevo no recibe
+  nada.
+
 ### 2026-09-24 — Migración de reclamo aplicada; despliegue de la fase 1
 
 - `20260924093000_webhook_event_reclaim.sql` se ejecutó manualmente en el SQL
