@@ -240,10 +240,6 @@ el catálogo real y consultas reales de pacientes.
 - **Calibrar umbrales de búsqueda** (0.35 / 0.6 / 0.1) con el catálogo real.
 - **Definir quién y cómo carga los alias.** El importador todavía no maneja
   alias; los alias genéricos deben asociarse a todas sus variantes.
-- **Vulnerabilidades en dependencias.** `npm audit` reporta `next` 16.2.10
-  (crítica), `postcss` y `sharp` (altas). Ya existían antes de la fase 2; no
-  las introdujo `tsx`. Evaluar actualizar Next en un cambio aparte, con
-  lint, tests y build.
 - **Lista de precios de PlusMedik.** Sin ella no se puede cargar el catálogo.
   Al recibirla, validarla con `validateCatalogCsv` y decidir si el formato se
   adapta (separador, precios, códigos).
@@ -271,6 +267,20 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-24 — Actualización de seguridad: Next 16.3.6
+
+- `next` y `eslint-config-next` 16.2.10 → **16.3.6**, juntos y con versión
+  exacta. Sin `npm audit fix --force`.
+- Arrastra `postcss` 8.4.31 → 8.5.23 y `sharp` 0.34.5 → 0.35.4
+  (dependencias de Next). `npm audit` y `npm audit --omit=dev`: **0
+  vulnerabilidades** (antes 1 crítica y 2 altas).
+- Sin cambios de código. Lint, 256 tests y build pasan; `next start` local:
+  webhook `GET` 405 y `POST` sin firma 401.
+- Aviso conocido, **anterior** a esta actualización y sin efecto: `npm ls`
+  marca `picomatch@2.3.2` como `invalid` para la peer **opcional**
+  `picomatch ^3 || ^4` de `fdir` (solo la usa `vitest`, en desarrollo). No es
+  un error de instalación.
 
 ### 2026-09-24 — Fase 2, pasos 1 a 4 aprobados en revisión
 
