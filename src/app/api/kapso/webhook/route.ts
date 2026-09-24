@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import { resolveAgentGate } from '@/lib/agent/gate';
+import { buildPayloadDiagnostics } from '@/lib/attribution/debug';
 import { extractReferralAttribution } from '@/lib/attribution/referral';
 import { getServerEnv } from '@/lib/env';
 import { parseKapsoProvenance } from '@/lib/kapso/provenance';
 import {
   claimWebhookEvent,
+  insertAttributionDebug,
   insertConversationAttribution,
   markWebhookEvent,
   persistObservedProvenance,
@@ -82,6 +84,24 @@ export async function POST(request: Request): Promise<Response> {
           event: eventName,
           reason: error instanceof Error ? error.message : 'unknown',
         });
+      }
+
+      // Diagnóstico temporal: solo forma del payload y valores técnicos.
+      if (env.ATTRIBUTION_DEBUG_ENABLED) {
+        try {
+          await insertAttributionDebug(supabase, {
+            conversationId: result.conversationId,
+            providerMessageId: provenance.message.providerMessageId,
+            eventName,
+            observedAt: provenance.message.messageTimestamp,
+            diagnostics: buildPayloadDiagnostics(payload),
+          });
+        } catch (error) {
+          console.error('attribution_debug_failed', {
+            event: eventName,
+            reason: error instanceof Error ? error.message : 'unknown',
+          });
+        }
       }
     }
 

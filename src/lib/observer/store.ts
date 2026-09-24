@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { PayloadDiagnostics } from '@/lib/attribution/debug';
 import type { ReferralAttribution } from '@/lib/attribution/referral';
 import type { KapsoProvenance, ObservedMessage } from '@/lib/kapso/provenance';
 
@@ -166,4 +167,32 @@ export async function insertConversationAttribution(
   if (!error) return 'inserted';
   if (error.code === '23505') return 'duplicate';
   throw new Error(`conversation_attributions.insert: ${error.message}`);
+}
+
+/**
+ * Diagnóstico temporal: guarda solo la forma del payload y los valores
+ * técnicos de atribución. Nunca contenido del mensaje.
+ */
+export async function insertAttributionDebug(
+  supabase: SupabaseClient,
+  input: {
+    conversationId: string | null;
+    providerMessageId: string | null;
+    eventName: string;
+    observedAt: string | null;
+    diagnostics: PayloadDiagnostics;
+  },
+): Promise<'inserted' | 'duplicate'> {
+  const { error } = await supabase.from('webhook_attribution_debug').insert({
+    agent_conversation_id: input.conversationId,
+    provider_message_id: input.providerMessageId,
+    event_name: input.eventName,
+    payload_shape: input.diagnostics.payloadShape,
+    attribution_candidates: input.diagnostics.attributionCandidates,
+    observed_at: input.observedAt,
+  });
+
+  if (!error) return 'inserted';
+  if (error.code === '23505') return 'duplicate';
+  throw new Error(`webhook_attribution_debug.insert: ${error.message}`);
 }
