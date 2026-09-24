@@ -49,6 +49,7 @@ export async function POST(request: Request): Promise<Response> {
       idempotencyKey,
       eventName,
       payloadVersion,
+      staleSeconds: env.WEBHOOK_PROCESSING_STALE_SECONDS,
     });
 
     if (claim === 'duplicate') {
@@ -56,11 +57,13 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const provenance = parseKapsoProvenance(eventName, payload);
-    const result = await persistObservedProvenance(
-      supabase,
-      provenance,
-      env.HUMAN_TAKEOVER_PAUSE_MINUTES,
-    );
+    const result = await persistObservedProvenance(supabase, provenance, {
+      pauseMinutes: env.HUMAN_TAKEOVER_PAUSE_MINUTES,
+      blockWindow: {
+        gapSeconds: env.INBOUND_BLOCK_GAP_SECONDS,
+        maxSeconds: env.INBOUND_BLOCK_MAX_SECONDS,
+      },
+    });
 
     if (
       provenance.kind === 'customer_inbound' &&
@@ -121,6 +124,10 @@ export async function POST(request: Request): Promise<Response> {
         kind: provenance.kind,
         persisted: result.persisted,
         duplicate_message: result.duplicate ?? false,
+        // Observer: el bloque solo se informa; ninguna respuesta se envía.
+        block: result.block
+          ? { id: result.block.blockId, sequence: result.block.sequence }
+          : null,
         agent_gate: agentGate,
       },
       { status: 200 },

@@ -3,24 +3,57 @@ import type { PayloadDiagnostics } from '@/lib/attribution/debug';
 import type { ReferralAttribution } from '@/lib/attribution/referral';
 import type { KapsoProvenance, ObservedMessage } from '@/lib/kapso/provenance';
 
+export interface BlockWindow {
+  gapSeconds: number;
+  maxSeconds: number;
+}
+
+export interface BlockAssignment {
+  blockId: string;
+  sequence: number;
+  openedNewBlock: boolean;
+  closedBlockId: string | null;
+}
+
+export interface PersistOptions {
+  pauseMinutes: number;
+  blockWindow: BlockWindow;
+}
+
+export interface PersistResult {
+  persisted: boolean;
+  duplicate?: boolean;
+  conversationId?: string;
+  messageId?: string;
+  block?: BlockAssignment | null;
+}
+
+/**
+ * Reclama el evento para procesarlo. Un evento 'failed', o atascado en
+ * 'processing' más de staleSeconds, se vuelve a reclamar en el reintento.
+ */
 export async function claimWebhookEvent(
   supabase: SupabaseClient,
   input: {
     idempotencyKey: string;
     eventName: string;
     payloadVersion: string | null;
+    staleSeconds: number;
   },
 ): Promise<'claimed' | 'duplicate'> {
-  const { error } = await supabase.from('webhook_events').insert({
-    idempotency_key: input.idempotencyKey,
-    event_name: input.eventName,
-    payload_version: input.payloadVersion,
-    status: 'processing',
+  const { data, error } = await supabase.rpc('claim_webhook_event', {
+    p_idempotency_key: input.idempotencyKey,
+    p_event_name: input.eventName,
+    p_payload_version: input.payloadVersion,
+    p_stale_seconds: input.staleSeconds,
   });
 
-  if (!error) return 'claimed';
-  if (error.code === '23505') return 'duplicate';
-  throw new Error(`webhook_events.insert: ${error.message}`);
+  if (error) throw new Error(`claim_webhook_event: ${error.message}`);
+
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row) throw new Error('claim_webhook_event: no_data');
+
+  return row.claimed === true ? 'claimed' : 'duplicate';
 }
 
 export async function markWebhookEvent(
@@ -66,12 +99,28 @@ async function upsertConversation(
   return data.id as string;
 }
 
+async function findMessageId(
+  supabase: SupabaseClient,
+  providerMessageId: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from('agent_messages')
+    .select('id')
+    .eq('provider_message_id', providerMessageId)
+    .single();
+
+  if (error || !data) throw new Error(`agent_messages.select: ${error?.message ?? 'no_data'}`);
+  return data.id as string;
+}
+
 async function insertMessage(
   supabase: SupabaseClient,
   conversationId: string,
   message: ObservedMessage,
-): Promise<'inserted' | 'duplicate'> {
-  const { error } = await supabase.from('agent_messages').insert({
+): Promise<{ status: 'inserted' | 'duplicate'; messageId: string }> {
+  const { data, error } = await supabase
+    .from('agent_messages')
+    .insert({
     agent_conversation_id: conversationId,
     provider_message_id: message.providerMessageId,
     provider_conversation_id: message.providerConversationId,
@@ -84,11 +133,97 @@ async function insertMessage(
     content_type: message.contentType,
     metadata: message.metadata,
     message_timestamp: message.messageTimestamp,
+    })
+    .select('id')
+    .single();
+
+  if (!error && data) return { status: 'inserted', messageId: data.id as string };
+  if (error?.code === '23505' && message.providerMessageId) {
+    return {
+      status: 'duplicate',
+      messageId: await findMessageId(supabase, message.providerMessageId),
+    };
+  }
+  throw new Error(`agent_messages.insert: ${error?.message ?? 'no_data'}`);
+}
+
+/** Registra el archivo adjunto sin descargarlo. Idempotente por mensaje. */
+async function registerAttachment(
+  supabase: SupabaseClient,
+  messageId: string,
+  message: ObservedMessage,
+): Promise<void> {
+  if (!message.attachment) return;
+
+  const { error } = await supabase.from('agent_message_attachments').upsert(
+    {
+      agent_message_id: messageId,
+      kind: message.attachment.kind,
+      provider_media_id: message.attachment.providerMediaId,
+      mime_type: message.attachment.mimeType,
+      filename: message.attachment.filename,
+      sha256: message.attachment.sha256,
+      file_size_bytes: message.attachment.fileSizeBytes,
+    },
+    { onConflict: 'agent_message_id', ignoreDuplicates: true },
+  );
+
+  if (error) throw new Error(`agent_message_attachments.upsert: ${error.message}`);
+}
+
+/** Asigna el mensaje entrante a su bloque. El RPC es idempotente. */
+async function attachToBlock(
+  supabase: SupabaseClient,
+  messageId: string,
+  window: BlockWindow,
+): Promise<BlockAssignment> {
+  const { data, error } = await supabase.rpc('attach_inbound_message_to_block', {
+    p_message_id: messageId,
+    p_gap_seconds: window.gapSeconds,
+    p_max_seconds: window.maxSeconds,
   });
 
-  if (!error) return 'inserted';
-  if (error.code === '23505') return 'duplicate';
-  throw new Error(`agent_messages.insert: ${error.message}`);
+  if (error) throw new Error(`attach_inbound_message_to_block: ${error.message}`);
+
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row) throw new Error('attach_inbound_message_to_block: no_data');
+
+  return {
+    blockId: row.block_id,
+    sequence: row.block_sequence,
+    openedNewBlock: row.opened_new_block === true,
+    closedBlockId: row.closed_block_id ?? null,
+  };
+}
+
+async function closeOpenBlockOnHumanOutbound(
+  supabase: SupabaseClient,
+  conversationId: string,
+  message: ObservedMessage,
+): Promise<void> {
+  const { error } = await supabase.rpc('close_open_block_on_human_outbound', {
+    p_conversation_id: conversationId,
+    p_message_timestamp: message.messageTimestamp,
+  });
+
+  if (error) throw new Error(`close_open_block_on_human_outbound: ${error.message}`);
+}
+
+async function hasTakeoverEvent(
+  supabase: SupabaseClient,
+  conversationId: string,
+  providerMessageId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('agent_control_events')
+    .select('id')
+    .eq('agent_conversation_id', conversationId)
+    .eq('action', 'pause')
+    .eq('provider_message_id', providerMessageId)
+    .limit(1);
+
+  if (error) throw new Error(`agent_control_events.select: ${error.message}`);
+  return Array.isArray(data) && data.length > 0;
 }
 
 async function applyObservedHumanTakeover(
@@ -113,11 +248,18 @@ async function applyObservedHumanTakeover(
   if (error) throw new Error(`apply_observed_human_takeover: ${error.message}`);
 }
 
+/**
+ * Persiste un mensaje observado y sus efectos.
+ *
+ * Ante un mensaje repetido se vuelven a ejecutar los pasos idempotentes
+ * (bloque, adjunto, cierre de bloque, takeover pendiente): si un intento
+ * anterior falló a mitad de camino, el reintento lo completa.
+ */
 export async function persistObservedProvenance(
   supabase: SupabaseClient,
   provenance: KapsoProvenance,
-  pauseMinutes: number,
-): Promise<{ persisted: boolean; duplicate?: boolean; conversationId?: string }> {
+  options: PersistOptions,
+): Promise<PersistResult> {
   if (
     provenance.kind === 'unknown' ||
     provenance.kind === 'lifecycle'
@@ -125,18 +267,30 @@ export async function persistObservedProvenance(
     return { persisted: false };
   }
 
-  const conversationId = await upsertConversation(supabase, provenance.message);
-  const inserted = await insertMessage(supabase, conversationId, provenance.message);
+  const { message } = provenance;
+  const conversationId = await upsertConversation(supabase, message);
+  const { status, messageId } = await insertMessage(supabase, conversationId, message);
+  const duplicate = status === 'duplicate';
+  let block: BlockAssignment | null = null;
 
-  if (inserted === 'duplicate') {
-    return { persisted: true, duplicate: true, conversationId };
+  if (provenance.kind === 'customer_inbound') {
+    block = await attachToBlock(supabase, messageId, options.blockWindow);
+    await registerAttachment(supabase, messageId, message);
   }
 
   if (provenance.kind === 'human_outbound') {
-    await applyObservedHumanTakeover(supabase, conversationId, provenance.message, pauseMinutes);
+    const takeoverPending =
+      !duplicate ||
+      (message.providerMessageId !== null &&
+        !(await hasTakeoverEvent(supabase, conversationId, message.providerMessageId)));
+
+    if (takeoverPending) {
+      await applyObservedHumanTakeover(supabase, conversationId, message, options.pauseMinutes);
+    }
+    await closeOpenBlockOnHumanOutbound(supabase, conversationId, message);
   }
 
-  return { persisted: true, duplicate: false, conversationId };
+  return { persisted: true, duplicate, conversationId, messageId, block };
 }
 
 /**

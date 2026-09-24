@@ -1,3 +1,4 @@
+import { extractAttachment, isMediaType, type ObservedAttachment } from '@/lib/kapso/media';
 import { normalizePhone } from '@/lib/phone';
 
 export const KAPSO_EVENT_RECEIVED = 'whatsapp.message.received';
@@ -29,6 +30,7 @@ export interface ObservedMessage {
   content: string | null;
   contentType: string;
   metadata: Record<string, unknown> | null;
+  attachment: ObservedAttachment | null;
 }
 
 export type KapsoProvenance =
@@ -76,7 +78,7 @@ function timestamp(value: unknown): string {
 
 function contentOf(message: Rec, type: string): string | null {
   if (type === 'text') return str(rec(message.text)?.body);
-  if (['image', 'audio', 'video', 'document'].includes(type)) {
+  if (isMediaType(type)) {
     return str(rec(message[type])?.caption);
   }
   if (type === 'interactive') return str(rec(rec(message.interactive)?.body)?.text);
@@ -84,7 +86,7 @@ function contentOf(message: Rec, type: string): string | null {
 }
 
 function mediaMetadata(message: Rec, type: string): Record<string, unknown> | null {
-  if (!['image', 'audio', 'video', 'document'].includes(type)) return null;
+  if (!isMediaType(type)) return null;
   const media = rec(message[type]);
   if (!media) return { has_media: true };
 
@@ -126,6 +128,7 @@ function buildMessage(
     content: contentOf(message, type),
     contentType: type,
     metadata: mediaMetadata(message, type),
+    attachment: extractAttachment(message, type),
   };
 }
 

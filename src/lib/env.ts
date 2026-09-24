@@ -10,6 +10,15 @@ const schema = z.object({
     .enum(['true', 'false'])
     .default('true')
     .transform((value) => value === 'true'),
+  // Ventanas de agrupación de mensajes entrantes. Ver docs/BITACORA.md antes de cambiarlas.
+  INBOUND_BLOCK_GAP_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+  INBOUND_BLOCK_MAX_SECONDS: z.coerce.number().int().min(30).max(86_400).default(600),
+  // Segundos tras los cuales un evento en 'processing' se da por muerto y se
+  // reclama. Debe superar el maxDuration del webhook (30 s). Ver docs/BITACORA.md.
+  WEBHOOK_PROCESSING_STALE_SECONDS: z.coerce.number().int().min(60).max(3600).default(120),
+}).refine((env) => env.INBOUND_BLOCK_MAX_SECONDS >= env.INBOUND_BLOCK_GAP_SECONDS, {
+  message: 'INBOUND_BLOCK_MAX_SECONDS debe ser >= INBOUND_BLOCK_GAP_SECONDS',
+  path: ['INBOUND_BLOCK_MAX_SECONDS'],
 });
 
 export type ServerEnv = z.infer<typeof schema>;
@@ -24,6 +33,9 @@ export function getServerEnv(): ServerEnv {
     KAPSO_WEBHOOK_SECRET: process.env.KAPSO_WEBHOOK_SECRET,
     HUMAN_TAKEOVER_PAUSE_MINUTES: process.env.HUMAN_TAKEOVER_PAUSE_MINUTES ?? 30,
     ATTRIBUTION_DEBUG_ENABLED: process.env.ATTRIBUTION_DEBUG_ENABLED ?? 'true',
+    INBOUND_BLOCK_GAP_SECONDS: process.env.INBOUND_BLOCK_GAP_SECONDS ?? 60,
+    INBOUND_BLOCK_MAX_SECONDS: process.env.INBOUND_BLOCK_MAX_SECONDS ?? 600,
+    WEBHOOK_PROCESSING_STALE_SECONDS: process.env.WEBHOOK_PROCESSING_STALE_SECONDS ?? 120,
   });
   return cached;
 }
