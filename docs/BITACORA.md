@@ -111,8 +111,9 @@ a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
 - Con ambas migraciones aplicadas, el código de la fase 1 se sube por push a
   `main` de `rochayoan/lab-whatsapp-agent`. El proyecto de Vercel no está en
   la cuenta de quien hizo el push; se asume que Vercel despliega desde `main`.
-  Confirmar el despliegue con el primer webhook: la respuesta trae `block` y
-  `webhook_events.claimed_at` deja de ser null.
+  Confirmar el despliegue con el primer mensaje entrante: solo el código
+  nuevo llena `agent_messages.agent_message_block_id`. (`claimed_at` no sirve
+  como señal: su default `now()` también se llena con el código viejo.)
 
 ### 2026-09-24 — Reclamo de eventos atascados
 
