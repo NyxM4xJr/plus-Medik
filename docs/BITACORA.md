@@ -48,9 +48,10 @@ a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
 - No fusionar variantes de exámenes por nombre.
 - Helicobacter se mantiene como variantes separadas (cada una su fila en
   `lab_tests`), nunca como un panel combinado.
-- Riesgo conocido: si un alias genérico (p. ej. «helicobacter») se asocia a una
-  sola variante, `search_lab_catalog` lo devolverá como `exact_alias` y ocultará
-  las otras variantes. Revisar al cargar alias.
+- Un alias genérico (p. ej. «helicobacter») debe asociarse a **todas** sus
+  variantes. Si se asocia a una sola, la búsqueda devuelve solo esa como
+  coincidencia exacta: es un error de carga de datos, no de la búsqueda.
+  Revisar al cargar alias (ver [Catálogo: búsqueda](#catálogo-búsqueda)).
 - Toda respuesta está en modo observer/dry-run. No existe código que envíe
   mensajes. No se construye worker ni envío real hasta decidirlo en las pruebas
   previas a producción.
@@ -79,7 +80,177 @@ a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
   `agent_conversations`, para que fotos que llegan en paralelo caigan en el
   mismo bloque.
 
+## Catálogo: formato CSV
+
+Validador: `src/lib/catalog/validate.ts` (`validateCatalogCsv`). Solo lee texto
+y devuelve un reporte; no toca la base.
+
+Encabezado obligatorio (cualquier orden, sin distinguir mayúsculas):
+
+```text
+code,name,category,sample_type,price_bs,active,notes
+```
+
+- Separador: coma. Si el archivo viene con `;` (Excel en español) se rechaza
+  con `wrong_delimiter`. Se aceptan comillas, comas dentro de comillas, CRLF y
+  BOM. Columnas desconocidas: advertencia, se ignoran.
+- `name`: obligatorio. Si normaliza a vacío, bloquea.
+- `price_bs`: obligatorio, mayor que 0, hasta 2 decimales, **punto** decimal,
+  sin «Bs» ni separador de miles. Máximo 99 999 999.99 (`numeric(10,2)`).
+  Vacío, 0, negativo, con coma decimal o con formato inválido: **bloquea la
+  fila**.
+- `active`: `true/false`, `si/sí/no`, `1/0` (sin distinguir mayúsculas).
+  Vacío = `true`. Cualquier otro valor bloquea.
+- `category`, `sample_type`, `notes`: opcionales.
+- Filas completamente vacías: advertencia, se ignoran.
+
+Severidades: `blocking` (la fila no se puede importar), `review` (requiere
+aprobación humana) y `warning` (informativa). `autoImportAllowed` es `true`
+solo si no hay problemas de archivo y **todas** las filas están `ok`.
+
+- **Códigos duplicados** (sin distinguir mayúsculas): bloquean todas las
+  filas involucradas.
+- **Nombres que normalizan igual** (`normalizeLabText`, copia exacta de
+  `normalize_lab_text`): nunca se fusionan. Todas las filas involucradas
+  quedan en `review`, porque pueden ser variantes legítimas (p. ej. glucosa en
+  sangre y en orina).
+- **Código faltante** (estrategia provisional): la fila queda en `review` con
+  `proposedCode = AUTO-XXXXXXXX`, los primeros 8 hex de
+  `sha256(nombre normalizado | tipo de muestra normalizado)`. No depende del
+  orden de las filas ni del precio o la categoría. La propuesta **nunca** se
+  inserta sola: el código definitivo lo aprueba el usuario. Dos filas con
+  igual nombre y muestra producen la misma propuesta, pero ya están marcadas
+  como colisión de nombre. Una propuesta que choca con un código real del
+  archivo se marca `proposed_code_conflict`.
+
+## Catálogo: importador
+
+Código: `src/lib/catalog/import.ts`. `planCatalogImport(report, lab_tests)` es
+una función pura; `runCatalogImport(report, repository, { mode })` planifica
+contra el estado actual y solo escribe con `mode: 'apply'`. El modo por
+defecto es `dry-run`. El acceso a datos va detrás de `LabTestRepository`
+(`list`, `insert`, `update`): el importador no conoce Supabase.
+
+Clasificación de cada fila:
+
+| Clase | Cuándo |
+|---|---|
+| `create` | Fila `ok` cuyo código no existe en `lab_tests`. |
+| `update` | Fila `ok` con código existente y algún cambio en nombre, categoría, muestra, precio, `active` o notas. El patch lleva solo lo que cambió. |
+| `unchanged` | Fila `ok` idéntica a la existente. Los precios se comparan en centavos (45 = 45.00). |
+| `deactivate` | Examen **activo** en `lab_tests` cuyo código no aparece en **ninguna** fila del archivo. Se pone `active = false`; nunca se borra. |
+| `blocked` | Fila `blocked` o `needs_review` del validador, código que difiere solo en mayúsculas del existente, o código repetido en `lab_tests` sin distinguir mayúsculas. |
+| `unmanaged` | Examen de `lab_tests` sin código. No se puede emparejar (buscar por nombre está prohibido), así que nunca se toca. |
+| `conflicts` | Inconsistencia global de `lab_tests`: varias filas con el mismo código sin distinguir mayúsculas (`HEM01` y `hem01`). Se detecta **siempre**, aunque el CSV no use ese código o el archivo esté roto. Esas filas no se desactivan ni se tocan, y el plan no se puede aplicar hasta corregirlas a mano. |
+
+Reglas de seguridad:
+
+- Se empareja **solo por código**. Mismo nombre con otro código crea un examen
+  nuevo y desactiva el viejo; nunca se actualiza por nombre.
+- `proposedCode` nunca se convierte en código: esas filas salen `blocked`.
+- Un archivo con errores de formato no produce ninguna acción. Así un CSV
+  roto no puede desactivar el catálogo entero.
+- El código de una fila bloqueada no se desactiva: solo se desactiva lo que no
+  aparece en ninguna fila.
+- `apply` se rechaza (`CatalogImportRefusedError`, sin escribir nada) si el
+  plan tiene cualquier fila bloqueada, cualquier conflicto en `lab_tests` o si
+  el validador no permite la carga automática.
+- `apply` no es transaccional: si falla a mitad, repetir la importación
+  converge, porque lo ya aplicado sale como `unchanged`.
+
+## Catálogo: comando
+
+```bash
+npm run catalog:plan -- ruta/al/catalogo.csv
+```
+
+- **Siempre dry-run.** Acepta exactamente una ruta; cualquier opción
+  (`--apply`, `--mode=apply`, `-a`) se rechaza. No existe ninguna bandera
+  para aplicar.
+- Lee `SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` de `.env.local` (o del
+  entorno). Imprime solo el ref del proyecto (`Base: ...`) para confirmar
+  contra qué base compara; nunca la clave.
+- Lee `lab_tests` con `createSupabaseLabTestReader`
+  (`src/lib/catalog/supabase-reader.ts`), que implementa **solo**
+  `LabTestReader` (`list`). No tiene ningún método de escritura. Lee solo las
+  columnas necesarias, pagina de a 1000 filas (límite de PostgREST) y falla
+  si Supabase devuelve error o una fila con forma inesperada. Los errores
+  nombran el id y la columna, nunca los valores.
+- Código de salida: `0` el plan se podría aplicar; `2` el plan no se puede
+  aplicar (bloqueadas, conflictos o archivo con errores); `1` falló la lectura
+  del archivo o de Supabase.
+- Se ejecuta con `tsx` (devDependency), que resuelve los alias `@/`.
+
+## Catálogo: búsqueda
+
+SQL: `search_lab_catalog(p_query, p_limit)`, migración
+`20260924140000_catalog_search_candidates.sql` (reemplaza la de
+`20260918043714`). TypeScript: `src/lib/catalog/search.ts`
+(`searchLabCatalog`, `classifyCandidates`).
+
+**Modelo de alias genérico.** No hay tabla nueva. Un alias genérico es el
+mismo texto asociado a varias filas de `lab_tests` en `lab_test_aliases`, una
+fila por variante (la tabla ya lo permite: la unicidad es
+`(lab_test_id, normalized_alias)`). Ejemplo: «helicobacter» asociado a
+antígeno en heces, IgG, IgM y test del aliento. Un alias específico apunta a
+una sola fila («helicobacter igg» → IgG). La ambigüedad se define con los
+datos, no con la búsqueda.
+
+**Niveles del SQL.**
+
+1. Exactos: nombre normalizado igual **unido** a alias normalizado igual.
+   Ninguno oculta al otro (la versión anterior ocultaba los alias cuando
+   había nombre exacto).
+2. Difusos (`pg_trgm`, similitud ≥ **0.35**): solo si el nivel 1 no encontró
+   nada. Es intencional: si alguien escribe el nombre exacto de una variante,
+   las variantes parecidas no aparecen.
+
+Cada `lab_test_id` aparece una sola vez (si coincide por nombre y por alias,
+queda `exact_name`). Solo exámenes activos. `p_limit` se acota a 1–20 (5 por
+defecto). `total_candidates` cuenta los candidatos antes del límite. Orden:
+puntaje, nombre, id. Permisos: solo `service_role`.
+
+**Clasificación en TypeScript.**
+
+| Estado | Motivo | Cuándo |
+|---|---|---|
+| `unmatched` | `empty_query` | Consulta vacía (no se llama al RPC). |
+| `unmatched` | `no_candidates` | El RPC no devolvió candidatos. |
+| `ambiguous` | `truncated` | `total_candidates` > candidatos devueltos: el límite dejó variantes afuera. |
+| `matched` | `single_exact` | Exactamente un candidato y es exacto. |
+| `ambiguous` | `multiple_exact` | Más de un candidato exacto. |
+| `matched` | `fuzzy_clear` | Solo difusos, el mejor tiene puntaje ≥ **0.6** y supera al segundo por ≥ **0.1**. |
+| `ambiguous` | `fuzzy_low_score` | Solo difusos y el mejor tiene puntaje < 0.6 (aunque sea el único). |
+| `ambiguous` | `fuzzy_close_scores` | Solo difusos y los dos mejores están a menos de 0.1. |
+
+`match` solo existe con `matched` y siempre es uno de los candidatos del RPC.
+`candidates` trae siempre todos los devueltos, con `matchType` y
+`similarityScore` sin tocar.
+
+Umbrales (`FUZZY_MIN_SCORE` 0.35 en SQL, `FUZZY_CONFIDENT_SCORE` 0.6 y
+`CLOSE_SCORE_DELTA` 0.1 en TypeScript) son **provisionales**: se calibran con
+el catálogo real y consultas reales de pacientes.
+
 ## Pendientes
+
+- **Migración de búsqueda no aplicada.**
+  `20260924140000_catalog_search_candidates.sql` existe solo en el repo. Se
+  aplica en el SQL Editor cuando se autorice. Nada la usa todavía en
+  producción.
+- **Calibrar umbrales de búsqueda** (0.35 / 0.6 / 0.1) con el catálogo real.
+- **Definir quién y cómo carga los alias.** El importador todavía no maneja
+  alias; los alias genéricos deben asociarse a todas sus variantes.
+- **Vulnerabilidades en dependencias.** `npm audit` reporta `next` 16.2.10
+  (crítica), `postcss` y `sharp` (altas). Ya existían antes de la fase 2; no
+  las introdujo `tsx`. Evaluar actualizar Next en un cambio aparte, con
+  lint, tests y build.
+- **Lista de precios de PlusMedik.** Sin ella no se puede cargar el catálogo.
+  Al recibirla, validarla con `validateCatalogCsv` y decidir si el formato se
+  adapta (separador, precios, códigos).
+- **Carga real del catálogo.** Existe el comando de plan (solo lectura), pero
+  ningún camino de escritura hacia Supabase. Antes de permitirlo, decidir si
+  la aplicación será una función SQL transaccional y si conviene una
+  confirmación extra cuando el plan desactiva muchos exámenes.
 
 - **`sha256` y `file_size` de Kapso sin confirmar.** El formato base ya está
   confirmado (ver registro 2026-09-24), pero el parser anterior no guardaba
@@ -100,6 +271,99 @@ a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-24 — Fase 2, pasos 1 a 4 aprobados en revisión
+
+- Aprobadas: la búsqueda difusa solo corre sin coincidencias exactas, y un
+  único candidato difuso con puntaje bajo queda `ambiguous`.
+- Umbrales aprobados **como provisionales**: mínimo difuso 0.35, confianza
+  0.60, diferencia mínima 0.10. No son definitivos hasta probarlos con los
+  nombres reales del catálogo.
+- Siguen separados de estos pasos: aplicar la migración de búsqueda, la
+  carga real del catálogo y el `apply` transaccional.
+
+### 2026-09-24 — Fase 2, paso 4: alias genéricos y búsqueda por candidatos
+
+- Nueva migración `20260924140000_catalog_search_candidates.sql` (no
+  aplicada): reemplaza `search_lab_catalog` con `drop` + `create` porque
+  cambia el tipo de retorno (se agrega `total_candidates`). Mismos permisos.
+  No se modificó ninguna migración anterior ni se creó tabla nueva.
+- Fallo corregido: la versión anterior usaba `NOT EXISTS` globales; un
+  nombre exacto ocultaba los alias exactos de otros exámenes. Verificado
+  corriendo los tests nuevos contra la función anterior: fallan 11, entre
+  ellos «un nombre exacto no oculta los alias exactos».
+- Decisión: la búsqueda difusa solo corre si no hay ninguna coincidencia
+  exacta. Las coincidencias exactas nunca se suprimen entre sí.
+- Nuevo `src/lib/catalog/search.ts`. Reglas y umbrales en
+  [Catálogo: búsqueda](#catálogo-búsqueda).
+- Tests con catálogo inventado en PGlite (`search.sql.test.ts`), incluido el
+  módulo TypeScript ejecutado contra el SQL real: «helicobacter» → ambiguous
+  con 4 variantes; «helicobacter igg» → matched IgG; «hemograma» → matched;
+  «glucosa» con dos nombres iguales → ambiguous con ambos; consulta sin
+  relación → unmatched.
+
+### 2026-09-24 — Fase 2, paso 3: lector de Supabase y comando de plan
+
+- `LabTestRepository` se separó: `LabTestReader` (`list`) para planificar, y
+  `LabTestRepository` que lo extiende con `insert`/`update` (solo lo usa el
+  repositorio en memoria de los tests). El adaptador de Supabase implementa
+  únicamente la lectura.
+- Nuevos: `src/lib/catalog/supabase-reader.ts`,
+  `src/lib/catalog/plan-command.ts`, `scripts/catalog-plan.ts` y el script
+  `npm run catalog:plan`. Reglas en [Catálogo: comando](#catálogo-comando).
+- Prueba de humo contra la base real (`cvokrtrdzxfchntwwslz`, solo lectura)
+  con un CSV inventado de 5 filas: 3 `create` (incluidas dos variantes de
+  Helicobacter separadas), 1 en revisión (sin código, con propuesta
+  `AUTO-...`), 1 bloqueada (precio 0), salida `2`. `lab_tests` siguió con 0
+  filas después. `--apply` se rechaza con salida `1`.
+- Se agregó `tsx` como devDependency para ejecutar el script.
+
+### 2026-09-24 — Importador: conflictos globales de códigos en lab_tests
+
+- Fallo encontrado en revisión: si `lab_tests` tenía `HEM01` y `hem01` y el
+  CSV no usaba ese código, el plan proponía desactivar ambos. Solo se
+  bloqueaban cuando el CSV intentaba usar el código.
+- Corrección: el plan tiene una colección `conflicts`
+  (`duplicate_existing_code`, con las filas involucradas), calculada siempre.
+  Los códigos en conflicto se excluyen de las desactivaciones; el motivo se
+  agrega a `notApplicableReasons`, `canApply` queda en `false` y `apply` se
+  rechaza sin escribir. Los demás exámenes ausentes se siguen mostrando en el
+  plan como desactivaciones.
+- Las cuatro decisiones del paso 2 quedaron aprobadas en revisión: archivo
+  roto sin acciones, fila bloqueada no desactiva su código, `unmanaged` sin
+  tocar, diferencia de mayúsculas bloqueante.
+- Verificado con mutación: si se quita la exclusión de los conflictos en las
+  desactivaciones, fallan 2 tests.
+
+### 2026-09-24 — Fase 2, paso 2: importador del catálogo en dry-run
+
+- Nuevo `src/lib/catalog/import.ts` y el repositorio simulado
+  `src/test/memory-lab-tests.ts`. Reglas en la sección
+  [Catálogo: importador](#catálogo-importador).
+- Decisiones propias de este paso, no pedidas explícitamente: un archivo roto
+  no genera desactivaciones; el código de una fila bloqueada no se desactiva;
+  los `lab_tests` sin código quedan como `unmanaged`; un código que difiere
+  solo en mayúsculas del existente se bloquea en vez de crear un duplicado.
+- Formato aprobado provisionalmente: CSV con coma y precios con punto. No se
+  aceptan `;` ni coma decimal de forma silenciosa: si la lista real viene de
+  Excel en español, el validador se adapta explícitamente en ese momento.
+- Verificado con mutaciones: si se quita la protección de archivo roto, o si
+  las filas en revisión dejan de bloquearse, los tests fallan.
+- Sin adaptador de Supabase ni script de línea de comandos todavía: nada en
+  el repo puede escribir en `lab_tests` real.
+
+### 2026-09-24 — Fase 2, paso 1: validador del catálogo CSV
+
+- Nuevo `src/lib/catalog/`: `csv.ts` (parser sin dependencias),
+  `normalize.ts` (copia de `normalize_lab_text`) y `validate.ts` (validador).
+  Reglas en la sección [Catálogo: formato CSV](#catálogo-formato-csv).
+- `normalize.sql.test.ts` compara la normalización de TypeScript con la de
+  Postgres (PGlite) en 16 casos (tildes, `ü`, `ñ`, signos, `à`/`ç` que SQL no
+  traduce y elimina). Si alguien cambia una de las dos, ese test falla.
+- Sin importador, sin migraciones y sin llamadas a Supabase en este paso.
+- Aún no se sabe si la lista real de PlusMedik trae códigos, qué separador
+  usa ni cómo escribe los precios: el formato puede requerir ajustes al
+  recibirla.
 
 ### 2026-09-24 — Primer tráfico real con la fase 1
 

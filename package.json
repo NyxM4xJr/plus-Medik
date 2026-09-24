@@ -11,7 +11,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "catalog:plan": "tsx scripts/catalog-plan.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.7",
@@ -27,6 +28,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

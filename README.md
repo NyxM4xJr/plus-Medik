@@ -65,6 +65,16 @@ npm run build
 
 Los tests de SQL (`*.sql.test.ts`) aplican todas las migraciones en un Postgres en memoria (PGlite). No se conectan a Supabase.
 
+## Catálogo
+
+Para ver qué haría una importación del catálogo, sin escribir nada:
+
+```bash
+npm run catalog:plan -- ruta/al/catalogo.csv
+```
+
+Formato del CSV, reglas y clasificación del plan: [docs/BITACORA.md](docs/BITACORA.md#catálogo-formato-csv).
+
 ## Webhook Kapso
 
 Una vez desplegado, configura el webhook de Kapso hacia:
