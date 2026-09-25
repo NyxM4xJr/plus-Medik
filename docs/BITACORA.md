@@ -34,6 +34,7 @@ No anotar aquí secretos, teléfonos, nombres de pacientes ni contenido clínico
 | `maxDuration` del webhook | `30` s | `route.ts` | Tiempo máximo de ejecución en Vercel. Pasado este tiempo la función muere y el evento queda en `processing`. | Si se sube, `WEBHOOK_PROCESSING_STALE_SECONDS` debe seguir siendo mayor. |
 | `WEBHOOK_PROCESSING_STALE_SECONDS` | `120` | RPC `claim_webhook_event` | Segundos tras los cuales un evento en `processing` se da por muerto y un reintento de Kapso lo vuelve a reclamar. Se mide desde `claimed_at` (o `received_at` en filas anteriores a la migración). Mínimo 60, y siempre mayor que `maxDuration`. | Muy bajo: un intento vivo y su reintento procesan el mismo evento a la vez. Muy alto: si Kapso deja de reintentar antes, el mensaje se pierde. |
 | `webhook_attribution_debug.expires_at` | `now() + 7 días` | Migración `20260923013716` | Marca de expiración del diagnóstico. **Nada borra esas filas todavía.** | La tabla crece indefinidamente. |
+| `CATALOG_MAX_DEACTIVATIONS` (límite, no tiempo) | `10` | `catalog:apply` → `p_max_deactivations` de `apply_lab_catalog_import` | Desactivaciones permitidas en una carga sin `--allow-mass-deactivation`. Entero ≥ 0; sin definir = 10; vacía o con otro formato, el comando no arranca. Queda en `lab_catalog_imports.max_deactivations`. Solo se lee en la máquina local (`.env.local`), no en Vercel. | Muy bajo: cualquier carga pide la bandera y se vuelve rutina. Muy alto: un CSV incompleto desactiva medio catálogo sin autorización especial. |
 
 Los valores 60 s / 600 s son iniciales y deben ajustarse en las pruebas previas
 a producción con ráfagas reales (receta de varias fotos, texto + fotos, etc.).
@@ -181,6 +182,61 @@ npm run catalog:plan -- ruta/al/catalogo.csv
   del archivo o de Supabase.
 - Se ejecuta con `tsx` (devDependency), que resuelve los alias `@/`.
 
+## Catálogo: carga
+
+```bash
+# Dry-run (predeterminado): muestra el plan y comprueba las opciones.
+npm run catalog:apply -- ruta/al/catalogo.csv --confirm-deactivations=OLD01,OLD02
+
+# Carga: mismas opciones más --apply y --operator.
+npm run catalog:apply -- ruta/al/catalogo.csv --confirm-deactivations=OLD01,OLD02   --apply --operator=NOMBRE [--allow-mass-deactivation]
+```
+
+Código: `src/lib/catalog/apply-command.ts` (lógica, probada con mocks y
+PGlite) y `scripts/catalog-apply.ts` (conexión a Supabase). Llama a
+`apply_lab_catalog_import` (migración `20260924180000`), que repite todas las
+validaciones en una transacción.
+
+- **Solo máquina local.** Se niega si el proceso tiene `VERCEL`,
+  `VERCEL_ENV`, `NEXT_RUNTIME` o `CI` (se comprueba antes de leer
+  `.env.local`). `--apply` exige una terminal interactiva. Ninguna ruta de
+  `src/app` importa el comando (lo comprueba un test).
+- **Dry-run por defecto.** Sin `--apply` nunca llama al RPC ni pide
+  confirmación. Informa qué opciones faltan, con la lista exacta de
+  desactivaciones para copiar.
+- **Qué se envía.** Solo filas `ok` de `validateCatalogCsv`, con claves
+  explícitas (`code`, `name`, `category`, `sample_type`, `price_bs` como texto
+  con 2 decimales, `active`, `notes`, `status`). `proposedCode` nunca viaja.
+  `p_expected_counts` son los conteos del plan mostrado. `p_source` lleva
+  `csv_sha256` (de los **bytes** del archivo, con BOM y CRLF incluidos),
+  `operator`, `filename` (sin la ruta local) y `tool`.
+- **Rechazos antes del RPC** (código 2): plan no aplicable (filas bloqueadas o
+  en revisión, conflictos en `lab_tests`, archivo con errores); falta
+  `--confirm-deactivations` cuando el plan desactiva; la lista no coincide
+  exactamente (sin distinguir mayúsculas, sin repetidos ni vacíos); más
+  desactivaciones que `CATALOG_MAX_DEACTIVATIONS` sin
+  `--allow-mass-deactivation`; `--allow-mass-deactivation` sin necesidad (para
+  que no se vuelva un hábito); falta `--operator` con `--apply`. Opciones
+  desconocidas, repetidas o mal formadas: código 1.
+- **Confirmación.** Muestra el resumen y pide escribir `aplicar <ref del
+  proyecto>`. Cualquier otra respuesta cancela (código 3). Escribir el ref
+  obliga a mirar contra qué base se aplica.
+- **Plan cambiado.** Después de confirmar vuelve a leer `lab_tests` y compara
+  una huella del plan completo (no solo conteos). Si difiere, no llama al RPC.
+  Entre esa lectura y el RPC, la función detecta los cambios con
+  `p_expected_counts` y la lista de desactivaciones.
+- **Nada que aplicar** (sin create, update ni deactivate): no llama al RPC. Así,
+  ejecutar dos veces el mismo archivo no genera una segunda carga.
+- **Una sola llamada.** Sin reintentos: `.retry(false)` en supabase-js (que de
+  todos modos solo reintenta GET/HEAD/OPTIONS). Error con código de Postgres =
+  la transacción se revirtió. Error sin código, excepción o respuesta con otro
+  formato = **resultado desconocido**: revisar `lab_catalog_imports`
+  (`applied_at`, `source->>'csv_sha256'`) antes de volver a ejecutar.
+- **UTF-8 obligatorio.** Un CSV en Windows-1252 (Excel «CSV» sin UTF-8) se
+  rechaza en lugar de guardar nombres con caracteres rotos.
+- Códigos de salida: `0` dry-run aplicable, nada que aplicar o carga aplicada;
+  `1` error (archivo, Supabase, RPC, opciones); `2` rechazado; `3` cancelado.
+
 ## Catálogo: búsqueda
 
 SQL: `search_lab_catalog(p_query, p_limit)`, migración
@@ -239,10 +295,10 @@ el catálogo real y consultas reales de pacientes.
 - **Lista de precios de PlusMedik.** Sin ella no se puede cargar el catálogo.
   Al recibirla, validarla con `validateCatalogCsv` y decidir si el formato se
   adapta (separador, precios, códigos).
-- **Carga real del catálogo.** La función transaccional existe en la
-  migración `20260924180000` (sin aplicar). Orden acordado: revisar la
-  migración → aplicarla a mano en Supabase → verificar permisos, índice y
-  función → construir `catalog:apply`. `catalog:plan` sigue solo lectura.
+- **Carga real del catálogo.** Función aplicada en Supabase y
+  `catalog:apply` construido y probado solo con mocks y PGlite. **Nunca se
+  ejecutó contra Supabase.** La primera carga real necesita autorización
+  explícita y la lista de precios de PlusMedik.
 - **Probar la concurrencia de la carga** con dos sesiones reales en un entorno
   de pruebas.
 
@@ -265,6 +321,25 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-24 — `catalog:apply` (sin ejecutar contra Supabase)
+
+- Nuevo comando `npm run catalog:apply`, reglas en
+  [Catálogo: carga](#catálogo-carga). Nueva variable
+  `CATALOG_MAX_DEACTIVATIONS` en la tabla de valores.
+- `formatCatalogPlan` se separó en `formatCatalogPlanDetails` (el detalle) y el
+  encabezado/cierre de `catalog:plan`, para que ambos comandos muestren el
+  mismo plan. La salida de `catalog:plan` no cambió.
+- Pruebas: `apply-command.test.ts` (mocks: opciones, límite, entorno local,
+  hash, `p_source`, filas enviadas, confirmación, plan cambiado, errores del
+  RPC) y `apply-command.sql.test.ts` (el comando contra la función real en
+  PGlite: dry-run sin escrituras, carga con auditoría, segunda ejecución,
+  `plan_changed` y `deactivation_confirmation_mismatch` provocados justo antes
+  del RPC). Mutaciones comprobadas: quitar la re-planificación, enviar
+  `proposedCode`, quitar la guarda masiva, hashear el texto en vez de los
+  bytes, reintentar el RPC, aceptar una confirmación laxa, aceptar códigos de
+  más y enviar filas en revisión hacen fallar los tests.
+- No se ejecutó ninguna carga ni se leyó ni escribió Supabase.
 
 ### 2026-09-24 — Migración de carga aplicada; git con la cuenta correcta
 

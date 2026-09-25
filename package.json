@@ -12,7 +12,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "catalog:plan": "tsx scripts/catalog-plan.ts"
+    "catalog:plan": "tsx scripts/catalog-plan.ts",
+    "catalog:apply": "tsx scripts/catalog-apply.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.7",

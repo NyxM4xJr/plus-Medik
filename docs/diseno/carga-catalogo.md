@@ -1,9 +1,10 @@
 # Diseño: carga transaccional del catálogo
 
 Estado: **segunda versión aprobada e implementada** en
-`supabase/migrations/20260924180000_catalog_import_apply.sql`, **pendiente de
-revisión y sin aplicar** en Supabase. `catalog:plan` sigue siendo solo lectura
-y `catalog:apply` no existe. Las decisiones aprobadas están en
+`supabase/migrations/20260924180000_catalog_import_apply.sql`, **aplicada** en
+Supabase. `catalog:plan` sigue siendo solo lectura. `catalog:apply` existe
+(`src/lib/catalog/apply-command.ts`, reglas en `docs/BITACORA.md`, «Catálogo:
+carga») y nunca se ejecutó contra Supabase. Las decisiones aprobadas están en
 [Decisiones aprobadas](#decisiones-aprobadas); las diferencias entre este
 documento y la implementación, en
 [Notas de implementación](#notas-de-implementación).
@@ -260,11 +261,10 @@ caso el CSV se aplica igual y sobrescribe la edición manual, que queda en
 catálogo y la edición manual de `lab_tests` no es un flujo previsto. Si
 hiciera falta más, la alternativa es una huella (hash) del plan completo
 calculada igual en TypeScript y SQL; queda anotada como posible mejora.
-- En `catalog:apply` (futuro) esto se traduce en opciones explícitas, por
-  ejemplo `--confirm-deactivations=HEM01,GLU01` y
-  `--allow-mass-deactivation`. El umbral sale de `CATALOG_MAX_DEACTIVATIONS`
-  (10), que se agregará a la tabla de valores de la bitácora junto con el
-  comando.
+- En `catalog:apply` esto se traduce en opciones explícitas:
+  `--confirm-deactivations=HEM01,GLU01` y `--allow-mass-deactivation`. El
+  umbral sale de `CATALOG_MAX_DEACTIVATIONS` (10), documentado en la tabla de
+  valores de la bitácora.
 
 ## Auditoría
 
@@ -403,3 +403,7 @@ Diferencias o precisiones respecto de lo escrito arriba:
   (`is not true`). No quitarlos.
 - **Nombre:** la función se llama `apply_lab_catalog_import`, como en este
   diseño.
+- **`catalog:apply` compara una huella del plan completo** entre lo que vio el
+  operador y el momento de aplicar, además de lo que compara la función. Eso
+  cubre el límite de los cambios que se compensan, salvo en el intervalo
+  entre esa última lectura y el RPC.

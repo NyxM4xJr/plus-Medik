@@ -33,18 +33,12 @@ function section(title: string, lines: string[]): string[] {
   return lines.length === 0 ? [] : ['', `${title}:`, ...lines.map((line) => `  ${line}`)];
 }
 
-export function formatCatalogPlan(
-  report: CatalogValidationReport,
-  plan: CatalogImportPlan,
-  meta: { csvPath: string; target: string },
-): string[] {
+/** Detalle del plan, sin encabezado ni conclusión. Lo comparten catalog:plan y catalog:apply. */
+export function formatCatalogPlanDetails(report: CatalogValidationReport, plan: CatalogImportPlan): string[] {
   const s = plan.summary;
   const fileProblems = report.fileIssues.filter((issue) => issue.severity !== 'warning');
 
   return [
-    'DRY-RUN: plan de importación del catálogo. No se escribió nada.',
-    `Archivo: ${meta.csvPath}`,
-    `Base: ${meta.target}`,
     `Filas del archivo: ${report.summary.rows} (ok ${report.summary.ok}, en revisión ${report.summary.needsReview}, bloqueadas ${report.summary.blocked}, vacías ignoradas ${report.summary.emptyRowsSkipped})`,
     '',
     'Resumen:',
@@ -80,6 +74,19 @@ export function formatCatalogPlan(
     ),
     ...section('Desactivar', plan.deactivate.map((d) => `${d.code}  ${d.name}`)),
     ...section('Sin código en lab_tests (no se tocan)', plan.unmanaged.map((u) => `id ${u.id}  ${u.name}`)),
+  ];
+}
+
+export function formatCatalogPlan(
+  report: CatalogValidationReport,
+  plan: CatalogImportPlan,
+  meta: { csvPath: string; target: string },
+): string[] {
+  return [
+    'DRY-RUN: plan de importación del catálogo. No se escribió nada.',
+    `Archivo: ${meta.csvPath}`,
+    `Base: ${meta.target}`,
+    ...formatCatalogPlanDetails(report, plan),
     '',
     plan.canApply
       ? 'Resultado: el plan se podría aplicar (este comando nunca aplica).'
