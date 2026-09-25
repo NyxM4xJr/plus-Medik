@@ -233,20 +233,18 @@ el catálogo real y consultas reales de pacientes.
 
 ## Pendientes
 
-- **Migración de búsqueda no aplicada.**
-  `20260924140000_catalog_search_candidates.sql` existe solo en el repo. Se
-  aplica en el SQL Editor cuando se autorice. Nada la usa todavía en
-  producción.
 - **Calibrar umbrales de búsqueda** (0.35 / 0.6 / 0.1) con el catálogo real.
 - **Definir quién y cómo carga los alias.** El importador todavía no maneja
   alias; los alias genéricos deben asociarse a todas sus variantes.
 - **Lista de precios de PlusMedik.** Sin ella no se puede cargar el catálogo.
   Al recibirla, validarla con `validateCatalogCsv` y decidir si el formato se
   adapta (separador, precios, códigos).
-- **Carga real del catálogo.** Existe el comando de plan (solo lectura), pero
-  ningún camino de escritura hacia Supabase. Antes de permitirlo, decidir si
-  la aplicación será una función SQL transaccional y si conviene una
-  confirmación extra cuando el plan desactiva muchos exámenes.
+- **Carga real del catálogo.** La función transaccional existe en la
+  migración `20260924180000` (sin aplicar). Orden acordado: revisar la
+  migración → aplicarla a mano en Supabase → verificar permisos, índice y
+  función → construir `catalog:apply`. `catalog:plan` sigue solo lectura.
+- **Probar la concurrencia de la carga** con dos sesiones reales en un entorno
+  de pruebas.
 
 - **`sha256` y `file_size` de Kapso sin confirmar.** El formato base ya está
   confirmado (ver registro 2026-09-24), pero el parser anterior no guardaba
@@ -268,6 +266,56 @@ el catálogo real y consultas reales de pacientes.
 
 ## Registro
 
+### 2026-09-24 — Migración de carga aplicada; git con la cuenta correcta
+
+- `20260924180000_catalog_import_apply.sql` se ejecutó manualmente en el SQL
+  Editor del proyecto `cvokrtrdzxfchntwwslz`. Verificado por la API REST:
+  `lab_catalog_imports` y `lab_catalog_import_changes` existen (vacías), y
+  `apply_lab_catalog_import` con `p_rows = null` responde
+  `invalid_input: p_rows no puede ser null` (llamada que no puede escribir).
+  `lab_tests` sigue vacío.
+- Verificado en el SQL Editor: índice `lab_tests_code_upper_unique`
+  presente; RLS activo en ambas tablas de auditoría; una sola
+  `apply_lab_catalog_import`, `security invoker`; ejecutable solo por
+  `service_role` (no `anon` ni `authenticated`); `anon` no puede leer la
+  auditoría; marcadores `[check:mass_flag]` presentes.
+- `8f0695e` (Next 16.3.6) está en `origin/main` y Vercel lo desplegó en
+  producción (`success`); webhook `GET` 405 y `POST` sin firma 401.
+- **Git en Windows con varias cuentas:** el administrador de credenciales
+  tiene guardadas `NyxM4x`, `rochayoan` y `x-access-token`. Elegir la
+  equivocada da `Repository not found`. Este clon fija la cuenta con
+  `git config --local credential.https://github.com.username NyxM4x`. Es un
+  ajuste local: cada compañero hace lo mismo en su clon con su cuenta.
+- El repo **no** tiene todavía la migración, sus tests ni estos documentos:
+  la base quedó adelantada al repositorio hasta el próximo commit.
+
+### 2026-09-24 — Carga transaccional del catálogo: migración (sin aplicar)
+
+- Nueva migración `20260924180000_catalog_import_apply.sql`, **no aplicada**
+  en Supabase: función `apply_lab_catalog_import`, índice único
+  `lab_tests_code_upper_unique` sobre `upper(code)` y tablas de auditoría
+  `lab_catalog_imports` y `lab_catalog_import_changes` (RLS, sin acceso para
+  `anon`/`authenticated`). Diseño: [docs/diseno/carga-catalogo.md](diseno/carga-catalogo.md).
+- Detalle de plpgsql que importa al revisar: cada `null` de parámetro se
+  comprueba en su propio `if`. `if x is null or x < 0` con `x = null` da
+  `null` y **no entra** en la rama: el parámetro pasaría sin rechazo.
+- Un código vacío (`''`) en `lab_tests` cuenta como «sin código», igual que
+  en `planCatalogImport`; si no, SQL lo desactivaría y TypeScript no.
+- `lab_catalog_import_changes.lab_test_id` no tiene `on delete cascade`: un
+  examen con historial de cargas ya no se puede borrar (defensa extra de
+  «nunca borrar»).
+- **Límite conocido y probado:** `p_expected_counts` no detecta dos cambios
+  manuales que se compensan exactamente; el CSV sobrescribe y el valor previo
+  queda en `before`. Hay un test que lo demuestra a propósito.
+- 82 tests en `src/lib/catalog/apply.sql.test.ts`. Verificado con 4
+  mutaciones de la migración (quitar `plan_changed`, quitar la confirmación,
+  usar `= false` en lugar de `is not true`, desactivar inactivos): todas
+  hacen fallar tests.
+- La concurrencia (advisory lock) no se puede probar en PGlite: una sola
+  conexión y el lock es reentrante en la misma sesión. Queda para las
+  pruebas previas a producción con dos sesiones reales, nunca contra el
+  catálogo de producción.
+
 ### 2026-09-24 — Actualización de seguridad: Next 16.3.6
 
 - `next` y `eslint-config-next` 16.2.10 → **16.3.6**, juntos y con versión
@@ -281,6 +329,19 @@ el catálogo real y consultas reales de pacientes.
   marca `picomatch@2.3.2` como `invalid` para la peer **opcional**
   `picomatch ^3 || ^4` de `fdir` (solo la usa `vitest`, en desarrollo). No es
   un error de instalación.
+
+### 2026-09-24 — Migración de búsqueda aplicada en Supabase
+
+- `20260924140000_catalog_search_candidates.sql` se ejecutó manualmente en el
+  SQL Editor del proyecto `cvokrtrdzxfchntwwslz`.
+- Verificado en la base: una sola `search_lab_catalog(text, integer)`, con
+  `total_candidates`; ejecutable por `service_role`, no por `anon` ni
+  `authenticated`; `security invoker`; sin los `NOT EXISTS` globales.
+- Verificado por la API REST (`rpc/search_lab_catalog`): responde 200 y lista
+  vacía, esperado con el catálogo sin filas.
+- El código del commit `9710dcb` ya estaba desplegado en Vercel antes de
+  aplicarla; no hubo desalineación visible porque nada en producción llama a
+  la búsqueda todavía.
 
 ### 2026-09-24 — Fase 2, pasos 1 a 4 aprobados en revisión
 
