@@ -331,8 +331,11 @@ el catálogo real y consultas reales de pacientes.
 
 - El proyecto de Vercel conectado a `NyxM4x/lab-whatsapp-agent` llegó al
   límite del plan gratuito. Se sube el mismo historial a
-  `NyxM4xJr/plus-Medik` (rama `main`; en el clon local es el remoto
-  `plus-medik`) para desplegarlo desde un proyecto de Vercel en esa cuenta.
+  `NyxM4xJr/plus-Medik` (rama `main`) para desplegarlo desde el proyecto de
+  Vercel `plusmedik` (equipo `nyx-m4x-jr`, dominio `plusmedik.vercel.app`).
+- En el clon local, `origin` pasa a ser `NyxM4xJr/plus-Medik` y se quitó el
+  remoto de `NyxM4x/lab-whatsapp-agent`: ese repo ya no se usa. Corrige la
+  entrada del 2026-09-24 «Repositorio y despliegue propios».
 - **El repo `NyxM4xJr/plus-Medik` es público** (decisión explícita). No
   contiene secretos: `.env.local` está ignorado y el historial solo tiene
   valores de ejemplo. Nunca subir claves ni datos de pacientes a este repo.
