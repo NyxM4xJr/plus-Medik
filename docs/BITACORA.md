@@ -347,7 +347,13 @@ el catálogo real y consultas reales de pacientes.
 - Verificar: `POST` sin firma responde **401** `invalid_signature`; `GET`,
   405. Después, un mensaje de prueba debe dar `POST 200` en los logs del
   proyecto nuevo.
-- Pendiente: confirmar que Kapso apunta solo al dominio nuevo y apagar o
+- El primer despliegue repitió el fallo del 2026-09-24: `POST` 500 con
+  `ZodError` en `ATTRIBUTION_DEBUG_ENABLED`, `INBOUND_BLOCK_GAP_SECONDS`,
+  `INBOUND_BLOCK_MAX_SECONDS` y `WEBHOOK_PROCESSING_STALE_SECONDS` (valores
+  vacíos o fuera de rango). Tras corregir las variables y redesplegar:
+  `GET` 405, `POST` sin firma 401. Kapso ya apunta a
+  `plusmedik.vercel.app/api/kapso/webhook`.
+- Pendiente: confirmar un `POST 200` de un mensaje real de Kapso y apagar o
   borrar el proyecto de Vercel anterior.
 
 ### 2026-09-26 — La bienvenida automática de WhatsApp Business cuenta como humano
