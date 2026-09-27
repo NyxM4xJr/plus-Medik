@@ -289,6 +289,11 @@ el catálogo real y consultas reales de pacientes.
 
 ## Pendientes
 
+- **La bienvenida automática de WhatsApp Business activa el takeover.** Ver
+  registro 2026-09-26. Hay que resolverlo **antes de activar respuestas
+  automáticas**: hoy cada cliente que recibe ese mensaje pausa al agente 30
+  minutos. Falta saber si el payload de Kapso distingue un mensaje automático
+  de la app de uno escrito a mano.
 - **Calibrar umbrales de búsqueda** (0.35 / 0.6 / 0.1) con el catálogo real.
 - **Definir quién y cómo carga los alias.** El importador todavía no maneja
   alias; los alias genéricos deben asociarse a todas sus variantes.
@@ -321,6 +326,48 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-27 — Nuevo repositorio y proyecto de Vercel
+
+- El proyecto de Vercel conectado a `NyxM4x/lab-whatsapp-agent` llegó al
+  límite del plan gratuito. Se sube el mismo historial a
+  `NyxM4xJr/plus-Medik` (rama `main`; en el clon local es el remoto
+  `plus-medik`) para desplegarlo desde un proyecto de Vercel en esa cuenta.
+- **El repo `NyxM4xJr/plus-Medik` es público** (decisión explícita). No
+  contiene secretos: `.env.local` está ignorado y el historial solo tiene
+  valores de ejemplo. Nunca subir claves ni datos de pacientes a este repo.
+- Pasos del nuevo despliegue: cargar en Vercel las 3 variables obligatorias
+  (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `KAPSO_WEBHOOK_SECRET`); las
+  opcionales, solo si se usan y **nunca vacías** (ver 2026-09-24). Luego
+  mover la URL del webhook en Kapso al nuevo dominio
+  (`https://<dominio>/api/kapso/webhook`).
+- Verificar: `POST` sin firma responde **401** `invalid_signature`; `GET`,
+  405. Después, un mensaje de prueba debe dar `POST 200` en los logs del
+  proyecto nuevo.
+- Pendiente: confirmar que Kapso apunta solo al dominio nuevo y apagar o
+  borrar el proyecto de Vercel anterior.
+
+### 2026-09-26 — La bienvenida automática de WhatsApp Business cuenta como humano
+
+Prueba con un teléfono del equipo contra el número de PlusMedik (observer,
+sin respuestas de nuestro sistema):
+
+- Fotos enviadas juntas: un bloque, `block_sequence` 1 y 2. Correcto.
+- Texto y fotos separados por 102 s: bloques distintos (`gap`). Correcto.
+- **Hallazgo:** 2 s después del primer «Hola», la app WhatsApp Business de
+  PlusMedik envió sola su mensaje de bienvenida/ausencia («Gracias por
+  comunicarte con LABORATORIO…»). Llegó como `outbound` con
+  `kapso.origin = business_app`, así que se guardó como `actor = human`:
+  cerró el bloque del «Hola» con `human_outbound` y pausó la conversación 30
+  minutos (`pause_source = business_app`). Por eso el segundo texto, 46 s
+  después, abrió un bloque nuevo en lugar de sumarse al primero.
+- El código hace lo que dice su regla (`business_app` = persona); la regla no
+  contempla los mensajes automáticos de la app. No afecta hoy porque nada
+  responde, pero con IA activa pausaría al agente en cada primer contacto.
+- Opciones a decidir: un campo del payload que distinga lo automático (por
+  confirmar); reconocer el texto exacto de la bienvenida configurada;
+  desactivar la bienvenida en la app cuando el agente salude. Sin cambios de
+  código todavía.
 
 ### 2026-09-24 — `catalog:apply` (sin ejecutar contra Supabase)
 
