@@ -310,14 +310,10 @@ el catálogo real y consultas reales de pacientes.
 - **Muestra de los códigos 7 y 410.** Vacía en la fuente; se carga vacía (el
   campo es opcional). Si un paciente pregunta, el agente debe derivar a una
   persona. Completar cuando el laboratorio la informe.
-- **Aplicar la migración `20260928120000_lab_test_tariffs.sql`.** Sin ella,
-  `catalog:plan` contra Supabase falla: el lector pide columnas que todavía no
-  existen. Requiere autorización explícita; nunca con `supabase db push`
-  sin revisarla.
-- **Carga real del catálogo.** `catalog:apply` construido y probado solo con
-  mocks y PGlite. **Nunca se ejecutó contra Supabase.** Requiere la migración
-  de tarifas, resolver las revisiones, verificar el plan final y autorización
-  explícita.
+- **Carga real del catálogo.** Migración de tarifas aplicada y dry-run real
+  limpio (registro 2026-09-28). Falta ejecutar `catalog:apply --apply` en
+  una terminal interactiva, con autorización explícita, y verificar
+  `lab_tests` y `lab_catalog_imports` después.
 - **Tarifa que cotiza el agente.** Por ahora, Precio Paciente (`price_bs`)
   para todos. Falta definir si alguna conversación usa otra tarifa y cómo se
   decide.
@@ -343,6 +339,16 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-28 — Migración de tarifas aplicada; dry-run real limpio
+
+- `20260928120000_lab_test_tariffs.sql` se ejecutó manualmente en el SQL
+  Editor del proyecto `cvokrtrdzxfchntwwslz`. Verificado: las cuatro columnas
+  `price_*` son `numeric(10,2)` y `apply_lab_catalog_import` incluye las
+  tarifas nuevas.
+- `catalog:plan` contra Supabase con el CSV de cuatro tarifas: 542 `create`,
+  0 `update`, 0 `deactivate`, 0 bloqueadas, 0 conflictos; el plan se puede
+  aplicar. Todavía no se ejecutó `catalog:apply --apply`.
 
 ### 2026-09-28 — Decisiones de la lista confirmadas; CSV listo para cargar
 
