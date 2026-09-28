@@ -8,3 +8,5 @@ out/
 .DS_Store
 supabase/.temp/
 *.tsbuildinfo
+.vercel
+.env*
