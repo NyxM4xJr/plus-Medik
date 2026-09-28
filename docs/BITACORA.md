@@ -310,10 +310,10 @@ el catálogo real y consultas reales de pacientes.
 - **Muestra de los códigos 7 y 410.** Vacía en la fuente; se carga vacía (el
   campo es opcional). Si un paciente pregunta, el agente debe derivar a una
   persona. Completar cuando el laboratorio la informe.
-- **Carga real del catálogo.** Migración de tarifas aplicada y dry-run real
-  limpio (registro 2026-09-28). Falta ejecutar `catalog:apply --apply` en
-  una terminal interactiva, con autorización explícita, y verificar
-  `lab_tests` y `lab_catalog_imports` después.
+- **Tabla `lab_tests_backup_20260928`.** Se creó a mano en el SQL Editor
+  antes de la carga, cuando `lab_tests` estaba vacía: tiene 0 filas y, por
+  crearse con `create table … as`, no tiene RLS. Borrarla
+  (`drop table public.lab_tests_backup_20260928;`) o activarle RLS.
 - **Tarifa que cotiza el agente.** Por ahora, Precio Paciente (`price_bs`)
   para todos. Falta definir si alguna conversación usa otra tarifa y cómo se
   decide.
@@ -339,6 +339,18 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-28 — Primera carga real del catálogo
+
+- `catalog:apply --apply` ejecutado por el responsable del proyecto en su
+  terminal, contra `cvokrtrdzxfchntwwslz`, con el CSV de cuatro tarifas
+  (fuera del repo). Resultado: carga aplicada, 542 creados.
+- Verificado en SQL: 542 exámenes, 542 activos, 0 sin alguna de las cuatro
+  tarifas; 126, 193, 337 y 453 con los valores decididos.
+- `catalog:plan` posterior con el mismo CSV: 542 `unchanged`, 0 del resto.
+  La base coincide con el archivo.
+- Siguen sin cargar los alias (la propuesta de Codex está fuera del repo y
+  el importador no los maneja).
 
 ### 2026-09-28 — Migración de tarifas aplicada; dry-run real limpio
 
