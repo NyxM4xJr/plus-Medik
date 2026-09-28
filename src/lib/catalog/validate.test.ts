@@ -1,16 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { withTariffs } from '@/test/catalog-fixtures';
 import {
   CATALOG_COLUMNS,
   proposeCatalogCode,
   validateCatalogCsv,
   type CatalogValidationReport,
   type IssueKind,
+  type TariffColumn,
 } from './validate';
 
 const HEADER = CATALOG_COLUMNS.join(',');
 
 function csv(...rows: string[]): string {
-  return [HEADER, ...rows].join('\n');
+  return [HEADER, ...rows.map(withTariffs)].join('\n');
 }
 
 function kinds(report: CatalogValidationReport, line: number): IssueKind[] {
@@ -52,11 +54,20 @@ describe('validateCatalogCsv: archivo válido', () => {
 
   it('acepta columnas en otro orden, encabezado con mayúsculas, BOM y CRLF', () => {
     const report = validateCatalogCsv(
-      '﻿Name,CODE,price_bs,active,notes,category,sample_type\r\nHemograma,HEM01,45,,,,\r\n',
+      '﻿Name,CODE,price_bs,active,notes,category,sample_type,PRICE_EMERGENCIA_BS,price_medicos_bs,price_convenio_bs\r\n' +
+        'Hemograma,HEM01,45,,,,,53,45,36\r\n',
     );
 
     expect(report.autoImportAllowed).toBe(true);
-    expect(row(report, 2)).toMatchObject({ code: 'HEM01', name: 'Hemograma', priceBs: 45, active: true });
+    expect(row(report, 2)).toMatchObject({
+      code: 'HEM01',
+      name: 'Hemograma',
+      priceBs: 45,
+      priceConvenioBs: 36,
+      priceMedicosBs: 45,
+      priceEmergenciaBs: 53,
+      active: true,
+    });
   });
 
   it('respeta comas y comillas dentro de campos entrecomillados', () => {
@@ -85,6 +96,17 @@ describe('validateCatalogCsv: problemas de archivo', () => {
       expect.objectContaining({ severity: 'blocking', kind: 'missing_column', message: expect.stringContaining('price_bs') }),
     );
     expect(report.rows).toEqual([]);
+  });
+
+  it('un CSV con el formato anterior (sin las otras tres tarifas) se rechaza entero', () => {
+    const report = validateCatalogCsv('code,name,category,sample_type,price_bs,active,notes\nHEM01,Hemograma,,,45,true,');
+
+    expect(report.rows).toEqual([]);
+    expect(report.fileIssues.filter((issue) => issue.kind === 'missing_column').map((issue) => issue.message)).toEqual([
+      'Falta la columna obligatoria «price_convenio_bs».',
+      'Falta la columna obligatoria «price_medicos_bs».',
+      'Falta la columna obligatoria «price_emergencia_bs».',
+    ]);
   });
 
   it('bloquea columnas repetidas y avisa columnas desconocidas', () => {
@@ -117,7 +139,11 @@ describe('validateCatalogCsv: problemas de archivo', () => {
   });
 
   it('ignora filas vacías con advertencia, sin bloquear la carga', () => {
-    const report = validateCatalogCsv(csv('HEM01,Hemograma,,,45,true,', '', ',,,,,,', 'GLU01,Glucosa,,,20,true,'));
+    const report = validateCatalogCsv(
+      [HEADER, withTariffs('HEM01,Hemograma,,,45,true,'), '', ',,,,,,,,,', withTariffs('GLU01,Glucosa,,,20,true,')].join(
+        '\n',
+      ),
+    );
 
     expect(report.summary.emptyRowsSkipped).toBe(2);
     expect(report.fileIssues.every((issue) => issue.kind === 'empty_row' && issue.severity === 'warning')).toBe(true);
@@ -259,6 +285,42 @@ describe('validateCatalogCsv: precios', () => {
     expect(hemograma.status).toBe('blocked');
     expect(hemograma.priceBs).toBeNull();
     expect(report.autoImportAllowed).toBe(false);
+  });
+
+  const tariffCases: Array<[TariffColumn, string]> = [
+    ['price_convenio_bs', 'HEM01,Hemograma,,,45,true,,{},45,53'],
+    ['price_medicos_bs', 'HEM01,Hemograma,,,45,true,,36,{},53'],
+    ['price_emergencia_bs', 'HEM01,Hemograma,,,45,true,,36,45,{}'],
+  ];
+
+  it.each(tariffCases)('%s sigue las mismas reglas que price_bs y bloquea la fila', (field, template) => {
+    for (const [value, kind] of [
+      ['', 'missing_price'],
+      ['0', 'zero_price'],
+      ['45.505', 'invalid_price'],
+    ] as const) {
+      const report = validateCatalogCsv([HEADER, template.replace('{}', value)].join('\n'));
+      const hemograma = row(report, 2);
+
+      expect(hemograma.issues).toContainEqual(expect.objectContaining({ severity: 'blocking', kind, field }));
+      expect(hemograma.status).toBe('blocked');
+    }
+  });
+
+  it('los mensajes nombran la tarifa', () => {
+    const report = validateCatalogCsv([HEADER, 'HEM01,Hemograma,,,45,true,,36,,53'].join('\n'));
+    expect(row(report, 2).issues[0].message).toBe('Falta el precio médicos.');
+  });
+
+  it('lee las cuatro tarifas de la misma fila', () => {
+    const report = validateCatalogCsv([HEADER, 'HEM01,Hemograma,,,45,true,,36,45.5,52.94'].join('\n'));
+    expect(row(report, 2)).toMatchObject({
+      priceBs: 45,
+      priceConvenioBs: 36,
+      priceMedicosBs: 45.5,
+      priceEmergenciaBs: 52.94,
+      status: 'ok',
+    });
   });
 
   it('la coma decimal sugiere usar punto', () => {

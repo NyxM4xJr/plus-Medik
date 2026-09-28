@@ -2,8 +2,9 @@ import type { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestDatabase } from '@/test/pglite';
 import { planCatalogImport, type CatalogImportPlan } from './import';
-import { mapLabTestRow } from './supabase-reader';
+import { LAB_TEST_COLUMNS, mapLabTestRow } from './supabase-reader';
 import { CATALOG_COLUMNS, validateCatalogCsv, type CatalogValidationReport } from './validate';
+import { DEFAULT_TARIFFS, withTariffs } from '@/test/catalog-fixtures';
 
 /**
  * apply_lab_catalog_import sobre PGlite, con catálogos inventados.
@@ -33,7 +34,7 @@ interface Prepared extends ApplyArgs {
 }
 
 function csv(...rows: string[]): string {
-  return [HEADER, ...rows].join('\n');
+  return [HEADER, ...rows.map(withTariffs)].join('\n');
 }
 
 /** Filas ok del reporte en el formato de p_rows (precio como texto). */
@@ -46,6 +47,9 @@ function payload(report: CatalogValidationReport): Json[] {
       category: row.category,
       sample_type: row.sampleType,
       price_bs: (row.priceBs as number).toFixed(2),
+      price_convenio_bs: (row.priceConvenioBs as number).toFixed(2),
+      price_medicos_bs: (row.priceMedicosBs as number).toFixed(2),
+      price_emergencia_bs: (row.priceEmergenciaBs as number).toFixed(2),
       active: row.active,
       notes: row.notes,
       status: row.status,
@@ -54,7 +58,7 @@ function payload(report: CatalogValidationReport): Json[] {
 
 async function existingTests() {
   const { rows } = await db.query<Json>(
-    'select id, code, name, category, sample_type, price_bs, active, notes from lab_tests order by id',
+    `select ${LAB_TEST_COLUMNS} from lab_tests order by id`,
   );
   return rows.map((row) => mapLabTestRow(row as never));
 }
@@ -100,8 +104,18 @@ async function seed(
 ) {
   for (const t of tests) {
     await db.query(
-      'insert into lab_tests (code, name, sample_type, price_bs, active) values ($1, $2, $3, $4, $5)',
-      [t.code, t.name, t.sample === undefined ? 'Sangre' : t.sample, t.price ?? 45, t.active ?? true],
+      'insert into lab_tests (code, name, sample_type, price_bs, price_convenio_bs, price_medicos_bs, ' +
+        'price_emergencia_bs, active) values ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [
+        t.code,
+        t.name,
+        t.sample === undefined ? 'Sangre' : t.sample,
+        t.price ?? 45,
+        DEFAULT_TARIFFS.priceConvenioBs,
+        DEFAULT_TARIFFS.priceMedicosBs,
+        DEFAULT_TARIFFS.priceEmergenciaBs,
+        t.active ?? true,
+      ],
     );
   }
 }
@@ -255,6 +269,63 @@ describe('camino feliz', () => {
   });
 });
 
+describe('cuatro tarifas', () => {
+  /** Fila con tarifas propias: paciente, convenio, médicos, emergencia. */
+  function tariffCsv(code: string, name: string, [paciente, convenio, medicos, emergencia]: number[]) {
+    return [HEADER, `${code},${name},,Sangre,${paciente},true,,${convenio},${medicos},${emergencia}`].join('\n');
+  }
+
+  async function tariffsOf(code: string) {
+    const test = await byCode(code);
+    return [test.price_bs, test.price_convenio_bs, test.price_medicos_bs, test.price_emergencia_bs].map(Number);
+  }
+
+  it('crea el examen una sola vez, con las cuatro tarifas en la misma fila, y las audita', async () => {
+    await apply(await prepare(tariffCsv('HEM01', 'Hemograma', [45, 36, 45, 53])));
+
+    expect((await snapshot()).tests).toHaveLength(1);
+    expect(await tariffsOf('HEM01')).toEqual([45, 36, 45, 53]);
+    const { rows } = await db.query<Json>('select after from lab_catalog_import_changes');
+    expect(rows[0].after).toMatchObject({
+      price_bs: 45,
+      price_convenio_bs: 36,
+      price_medicos_bs: 45,
+      price_emergencia_bs: 53,
+    });
+  });
+
+  it('un cambio solo en una tarifa es update, con before y after', async () => {
+    await apply(await prepare(tariffCsv('HEM01', 'Hemograma', [45, 36, 45, 53])));
+
+    const prepared = await prepare(tariffCsv('HEM01', 'Hemograma', [45, 36, 45, 60]));
+    expect(prepared.plan.update[0].changes).toEqual([{ field: 'priceEmergenciaBs', from: 53, to: 60 }]);
+    expect(await apply(prepared)).toMatchObject({ created: 0, updated: 1, unchanged: 0 });
+
+    expect(await tariffsOf('HEM01')).toEqual([45, 36, 45, 60]);
+    const { rows } = await db.query<Json>("select before, after from lab_catalog_import_changes where action = 'update'");
+    expect(rows[0].before).toMatchObject({ price_emergencia_bs: 53 });
+    expect(rows[0].after).toMatchObject({ price_emergencia_bs: 60 });
+  });
+
+  it('un examen cargado antes de las tarifas (nulas) se completa con update', async () => {
+    await db.query("insert into lab_tests (code, name, sample_type, price_bs) values ('HEM01', 'Hemograma', 'Sangre', 45)");
+
+    const prepared = await prepare(tariffCsv('HEM01', 'Hemograma', [45, 36, 45, 53]));
+    expect(prepared.plan.summary).toMatchObject({ create: 0, update: 1, unchanged: 0 });
+    await apply(prepared);
+
+    expect(await tariffsOf('HEM01')).toEqual([45, 36, 45, 53]);
+  });
+
+  it('la tabla rechaza tarifas en 0 o negativas', async () => {
+    for (const column of ['price_convenio_bs', 'price_medicos_bs', 'price_emergencia_bs']) {
+      await expect(
+        db.query(`insert into lab_tests (code, name, price_bs, ${column}) values ('X1', 'Uno', 10, 0)`),
+      ).rejects.toThrow(/check constraint/);
+    }
+  });
+});
+
 describe('idempotencia', () => {
   it('la misma carga dos veces: la segunda no cambia nada ni audita cambios', async () => {
     await seed(BASE);
@@ -279,6 +350,9 @@ describe('rechazos de filas: nada se escribe', () => {
     category: null,
     sample_type: 'Sangre',
     price_bs: '45.00',
+    price_convenio_bs: '30.00',
+    price_medicos_bs: '40.00',
+    price_emergencia_bs: '60.00',
     active: true,
     notes: null,
     status: 'ok',
@@ -306,6 +380,10 @@ describe('rechazos de filas: nada se escribe', () => {
     ['precio con coma', [row({ price_bs: '45,50' })], /^invalid_price/],
     ['precio con 3 decimales', [row({ price_bs: '45.505' })], /^invalid_price/],
     ['precio fuera de rango', [row({ price_bs: '100000000.00' })], /^invalid_price/],
+    ['tarifa Convenio faltante', [{ ...row(), price_convenio_bs: undefined }], /^invalid_price: filas 1/],
+    ['tarifa Médicos en 0', [row({ price_medicos_bs: '0.00' })], /^invalid_price: filas 1/],
+    ['tarifa Emergencia con 3 decimales', [row({ price_emergencia_bs: '53.123' })], /^invalid_price: filas 1/],
+    ['tarifa como número JSON', [row({ price_convenio_bs: 36 })], /^invalid_price: filas 1/],
     ['active como texto', [row({ active: 'true' })], /^invalid_active/],
     ['fila que no es objeto', [row(), 'HEM02'], /^invalid_input: filas que no son objeto: 2/],
     ['proposedCode enviado', [row({ proposedCode: 'AUTO-12345678' })], /^invalid_input: claves no admitidas: proposedCode/],

@@ -52,6 +52,9 @@ function dbRow(id: string, overrides: Row = {}): Row {
     category: 'Bioquímica',
     sample_type: 'Sangre',
     price_bs: 45,
+    price_convenio_bs: 30,
+    price_medicos_bs: 40,
+    price_emergencia_bs: 60,
     active: true,
     notes: null,
     ...overrides,
@@ -67,6 +70,9 @@ describe('mapLabTestRow', () => {
       category: 'Bioquímica',
       sampleType: 'Orina',
       priceBs: 45,
+      priceConvenioBs: 30,
+      priceMedicosBs: 40,
+      priceEmergenciaBs: 60,
       active: true,
       notes: 'En ayunas',
     });
@@ -74,6 +80,14 @@ describe('mapLabTestRow', () => {
 
   it('acepta price_bs numeric como texto', () => {
     expect(mapLabTestRow(dbRow('1', { price_bs: '120.50' }) as never).priceBs).toBe(120.5);
+  });
+
+  it('lee las otras tres tarifas como texto numeric y acepta null en exámenes anteriores', () => {
+    expect(
+      mapLabTestRow(
+        dbRow('1', { price_convenio_bs: '36.00', price_medicos_bs: null, price_emergencia_bs: '52.94' }) as never,
+      ),
+    ).toMatchObject({ priceConvenioBs: 36, priceMedicosBs: null, priceEmergenciaBs: 52.94 });
   });
 
   it('convierte nulos a null y conserva code null (unmanaged)', () => {
@@ -87,6 +101,8 @@ describe('mapLabTestRow', () => {
     ['active', { active: 'true' }, 'lab_tests_row_invalid: active (id 1)'],
     ['price_bs no numérico', { price_bs: 'abc' }, 'lab_tests_row_invalid: price_bs (id 1)'],
     ['price_bs nulo', { price_bs: null }, 'lab_tests_row_invalid: price_bs (id 1)'],
+    ['tarifa no numérica', { price_medicos_bs: 'abc' }, 'lab_tests_row_invalid: price_medicos_bs (id 1)'],
+    ['tarifa ausente del select', { price_convenio_bs: undefined }, 'lab_tests_row_invalid: price_convenio_bs (id 1)'],
   ])('falla con una fila de forma inesperada: %s', (_label, overrides, message) => {
     expect(() => mapLabTestRow(dbRow('1', overrides) as never)).toThrow(message);
   });
@@ -108,7 +124,7 @@ describe('createSupabaseLabTestReader', () => {
     expect(db.queries).toEqual([
       {
         table: 'lab_tests',
-        columns: 'id,code,name,category,sample_type,price_bs,active,notes',
+        columns: LAB_TEST_COLUMNS,
         order: ['id', { ascending: true }],
         range: [0, 999],
       },

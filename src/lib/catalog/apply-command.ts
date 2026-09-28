@@ -153,8 +153,11 @@ export interface CatalogRpcRow {
   name: string;
   category: string | null;
   sample_type: string | null;
-  /** Texto decimal con dos decimales: la función lo convierte a numeric(10,2). */
+  /** Tarifas como texto decimal con dos decimales: la función las convierte a numeric(10,2). */
   price_bs: string;
+  price_convenio_bs: string;
+  price_medicos_bs: string;
+  price_emergencia_bs: string;
   active: boolean;
   notes: string | null;
   status: 'ok';
@@ -165,8 +168,15 @@ export function buildRpcRows(report: CatalogValidationReport): CatalogRpcRow[] {
   return report.rows
     .filter((row) => row.status === 'ok')
     .map((row) => {
-      if (row.code === null || row.priceBs === null || row.active === null) {
-        throw new Error(`fila ${row.line} ok sin code, price_bs o active`);
+      if (
+        row.code === null ||
+        row.priceBs === null ||
+        row.priceConvenioBs === null ||
+        row.priceMedicosBs === null ||
+        row.priceEmergenciaBs === null ||
+        row.active === null
+      ) {
+        throw new Error(`fila ${row.line} ok sin code, alguna tarifa o active`);
       }
       return {
         code: row.code,
@@ -174,6 +184,9 @@ export function buildRpcRows(report: CatalogValidationReport): CatalogRpcRow[] {
         category: row.category,
         sample_type: row.sampleType,
         price_bs: row.priceBs.toFixed(2),
+        price_convenio_bs: row.priceConvenioBs.toFixed(2),
+        price_medicos_bs: row.priceMedicosBs.toFixed(2),
+        price_emergencia_bs: row.priceEmergenciaBs.toFixed(2),
         active: row.active,
         notes: row.notes,
         status: 'ok',

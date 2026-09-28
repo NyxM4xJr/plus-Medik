@@ -64,7 +64,15 @@ export function formatCatalogPlanDetails(report: CatalogValidationReport, plan: 
           `línea ${b.line} ${b.code ?? `sin código${b.proposedCode ? ` (propuesta ${b.proposedCode})` : ''}`} [${b.reason}]: ${b.detail}`,
       ),
     ),
-    ...section('Crear', plan.create.map((c) => `${c.values.code}  ${c.values.name}  Bs ${c.values.priceBs.toFixed(2)}`)),
+    ...section(
+      'Crear',
+      plan.create.map(
+        (c) =>
+          `${c.values.code}  ${c.values.name}  Bs paciente ${c.values.priceBs.toFixed(2)}` +
+          ` / convenio ${c.values.priceConvenioBs.toFixed(2)} / médicos ${c.values.priceMedicosBs.toFixed(2)}` +
+          ` / emergencia ${c.values.priceEmergenciaBs.toFixed(2)}`,
+      ),
+    ),
     ...section(
       'Actualizar',
       plan.update.map(

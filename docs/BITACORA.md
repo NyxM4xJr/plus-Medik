@@ -89,9 +89,16 @@ y devuelve un reporte; no toca la base.
 Encabezado obligatorio (cualquier orden, sin distinguir mayúsculas):
 
 ```text
-code,name,category,sample_type,price_bs,active,notes
+code,name,category,sample_type,price_bs,active,notes,price_convenio_bs,price_medicos_bs,price_emergencia_bs
 ```
 
+- **Cuatro tarifas por examen** (desde el 2026-09-28): `price_bs` es la tarifa
+  **Paciente**; `price_convenio_bs`, `price_medicos_bs` y
+  `price_emergencia_bs` son las otras tres. Son columnas de la misma fila, no
+  filas aparte: un examen tiene un solo código. Las cuatro siguen las reglas
+  de `price_bs` (abajo). Un CSV con el formato anterior (sin las tres
+  columnas nuevas) se rechaza entero, para que un archivo viejo no pueda
+  borrar tarifas.
 - Separador: coma. Si el archivo viene con `;` (Excel en español) se rechaza
   con `wrong_delimiter`. Se aceptan comillas, comas dentro de comillas, CRLF y
   BOM. Columnas desconocidas: advertencia, se ignoran.
@@ -205,8 +212,10 @@ validaciones en una transacción.
   confirmación. Informa qué opciones faltan, con la lista exacta de
   desactivaciones para copiar.
 - **Qué se envía.** Solo filas `ok` de `validateCatalogCsv`, con claves
-  explícitas (`code`, `name`, `category`, `sample_type`, `price_bs` como texto
-  con 2 decimales, `active`, `notes`, `status`). `proposedCode` nunca viaja.
+  explícitas (`code`, `name`, `category`, `sample_type`, las cuatro tarifas
+  `price_bs`, `price_convenio_bs`, `price_medicos_bs` y `price_emergencia_bs`
+  como texto con 2 decimales, `active`, `notes`, `status`). `proposedCode`
+  nunca viaja.
   `p_expected_counts` son los conteos del plan mostrado. `p_source` lleva
   `csv_sha256` (de los **bytes** del archivo, con BOM y CRLF incluidos),
   `operator`, `filename` (sin la ruta local) y `tool`.
@@ -296,14 +305,22 @@ el catálogo real y consultas reales de pacientes.
   de la app de uno escrito a mano.
 - **Calibrar umbrales de búsqueda** (0.35 / 0.6 / 0.1) con el catálogo real.
 - **Definir quién y cómo carga los alias.** El importador todavía no maneja
-  alias; los alias genéricos deben asociarse a todas sus variantes.
-- **Lista de precios de PlusMedik.** Sin ella no se puede cargar el catálogo.
-  Al recibirla, validarla con `validateCatalogCsv` y decidir si el formato se
-  adapta (separador, precios, códigos).
-- **Carga real del catálogo.** Función aplicada en Supabase y
-  `catalog:apply` construido y probado solo con mocks y PGlite. **Nunca se
-  ejecutó contra Supabase.** La primera carga real necesita autorización
-  explícita y la lista de precios de PlusMedik.
+  alias. Hay una propuesta local fuera del repositorio, aún no revisada ni
+  cargada; los alias genéricos deben asociarse a todas sus variantes.
+- **Muestra de los códigos 7 y 410.** Vacía en la fuente; se carga vacía (el
+  campo es opcional). Si un paciente pregunta, el agente debe derivar a una
+  persona. Completar cuando el laboratorio la informe.
+- **Aplicar la migración `20260928120000_lab_test_tariffs.sql`.** Sin ella,
+  `catalog:plan` contra Supabase falla: el lector pide columnas que todavía no
+  existen. Requiere autorización explícita; nunca con `supabase db push`
+  sin revisarla.
+- **Carga real del catálogo.** `catalog:apply` construido y probado solo con
+  mocks y PGlite. **Nunca se ejecutó contra Supabase.** Requiere la migración
+  de tarifas, resolver las revisiones, verificar el plan final y autorización
+  explícita.
+- **Tarifa que cotiza el agente.** Por ahora, Precio Paciente (`price_bs`)
+  para todos. Falta definir si alguna conversación usa otra tarifa y cómo se
+  decide.
 - **Probar la concurrencia de la carga** con dos sesiones reales en un entorno
   de pruebas.
 
@@ -326,6 +343,87 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-28 — Decisiones de la lista confirmadas; CSV listo para cargar
+
+Confirmado por el responsable del proyecto. Corrige el registro anterior de
+este mismo día, donde el sufijo « II» era provisional.
+
+- 193 «Renina II» y 194 «Serotonina II»: variantes distintas de 188 y 189. El
+  sufijo es definitivo.
+- ADN de paternidad 337-340: cada par difiere en tipo de muestra y precio. El
+  nombre lleva el tipo de muestra de la fuente
+  («… - Sangre con EDTA, Hisopado Bucal» / «… - Cabellos y uñas»). No se
+  fusionan.
+- 126 (factor VIII): Convenio (330) y Paciente (320) estaban invertidos en la
+  fuente; Paciente se queda con el mayor. Médicos y Emergencia se recalculan
+  con las fórmulas del Excel (Médicos = Convenio / 0.7, Emergencia =
+  Paciente / 0.85): 457.14 y 388.24.
+- 7 y 410: se cargan sin tipo de muestra, que no bloquea la carga.
+- Validación local (sin Supabase, contra catálogo vacío): 542 filas `ok`,
+  542 `create`, 0 bloqueadas, `canApply` verdadero. Los archivos (CSV,
+  decisiones y validación) están fuera del repo.
+
+### 2026-09-28 — Cuatro tarifas por examen (migración sin aplicar)
+
+- La lista de PlusMedik trae cuatro tarifas por examen: Convenio, Paciente,
+  Médicos y Emergencia particular. **Decisión:** columnas de `lab_tests`
+  (`price_convenio_bs`, `price_medicos_bs`, `price_emergencia_bs`, más
+  `price_bs` = Paciente), no filas ni una tabla aparte. Así un examen sigue
+  siendo una fila con un código y las cuatro tarifas se cargan, comparan y
+  auditan juntas en la transacción de `apply_lab_catalog_import`, sin lógica
+  nueva de diferencias entre tablas. Costo: una quinta tarifa exige otra
+  migración.
+- Migración `20260928120000_lab_test_tariffs.sql`: agrega las tres columnas
+  (`numeric(10,2)`, `> 0`; admiten null solo por exámenes anteriores) y
+  reemplaza `apply_lab_catalog_import` con la misma firma para exigir,
+  comparar y auditar las cuatro. **No se aplicó en Supabase.**
+- Validador, importador, lector y `catalog:apply` exigen las cuatro tarifas.
+  Un examen existente con tarifas nulas sale como `update` y las recibe.
+- El agente cotizará con **Precio Paciente** para todos por ahora.
+- Médicos y Emergencia son fórmulas en el Excel (Paciente / 0.85, etc.) con
+  más de dos decimales, que el Excel muestra como enteros. **Decisión:**
+  guardarlas redondeadas al centavo (mitad hacia arriba), no a enteros.
+- Se regeneró el CSV privado desde el Excel original (fuera del repo). Tres
+  errores del CSV anterior: el prefijo de notas salía «Preparaci?n» (ahora
+  «Preparacion», solo en el texto generado; el texto clínico de la fuente no
+  se modificó); el código 453 tenía «Suero 500 ul» aunque la fuente dice
+  «Heces fecales»; y la categoría HORMONAS no se detectaba porque su
+  encabezado está en la columna A, así que esos exámenes quedaban en
+  HEMATOLOGIA. El Excel no tiene caracteres dañados.
+- 193 y 194 llevan « II» en el nombre del borrador, **provisional**, para
+  separarlos de 188 (Renina) y 189 (Serotonina); difieren en tiempo de
+  entrega y en algunas tarifas.
+- Validación local del CSV nuevo (sin Supabase, contra catálogo vacío): 542
+  filas, 538 `ok`, 4 en revisión (pares de ADN de paternidad), 0 bloqueadas
+  por formato. Pendientes en «Pendientes».
+- Verificación: `npm test` (tests de tarifas en validador, importador,
+  lector y SQL con PGlite), `npm run lint`, `npm run build`.
+
+### 2026-09-28 — Primera lista de precios preparada (sin aplicar)
+
+- Se preparó localmente, fuera del repositorio público, un CSV UTF-8 con 542
+  filas y una propuesta separada de alias. No agregar el Excel, el CSV, la
+  propuesta ni la salida detallada del plan al repositorio.
+- Decisiones: conservar los códigos proporcionados por la lista y usar la
+  columna de precio para pacientes, porque el catálogo está destinado a
+  cotizaciones a pacientes. Se conservaron por separado las filas cuyos
+  nombres normalizan igual; no se inventaron códigos. No se incluyeron los
+  otros niveles de precio.
+- Dry-run de `catalog:plan`: 534 `create`, 0 `update`, 0 `unchanged`,
+  0 `deactivate`, 8 filas en revisión (cuatro pares con nombre normalizado
+  repetido), 0 errores de formato y 0 conflictos en `lab_tests`. El comando
+  terminó con código 2 porque las revisiones impiden aplicar. Dos filas no
+  tienen tipo de muestra en el origen; el campo es opcional, pero queda por
+  confirmar.
+- La propuesta de alias no se cargó. El alias genérico de Helicobacter apunta
+  a todas las variantes encontradas en la lista; una asociación de variante
+  en heces queda marcada para revisión por discrepancia en el tipo de muestra.
+- Verificación: volver a ejecutar
+  `npm run catalog:plan -- <ruta-local-al-csv>` y confirmar el conteo anterior;
+  la salida detallada, los datos de origen y los archivos preparados quedan
+  fuera del repositorio. No se ejecutó `catalog:apply --apply` ni se modificó
+  Supabase.
 
 ### 2026-09-27 — Nuevo repositorio y proyecto de Vercel
 

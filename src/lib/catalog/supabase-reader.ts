@@ -6,7 +6,8 @@ import type { ExistingLabTest, LabTestReader } from '@/lib/catalog/import';
  * escritura. Debe recibir un cliente creado con service_role en servidor.
  */
 
-export const LAB_TEST_COLUMNS = 'id,code,name,category,sample_type,price_bs,active,notes';
+export const LAB_TEST_COLUMNS =
+  'id,code,name,category,sample_type,price_bs,price_convenio_bs,price_medicos_bs,price_emergencia_bs,active,notes';
 
 /** Filas por página. PostgREST corta en 1000 por defecto. */
 export const LAB_TEST_PAGE_SIZE = 1000;
@@ -18,6 +19,9 @@ interface LabTestRow {
   category: unknown;
   sample_type: unknown;
   price_bs: unknown;
+  price_convenio_bs: unknown;
+  price_medicos_bs: unknown;
+  price_emergencia_bs: unknown;
   active: unknown;
   notes: unknown;
 }
@@ -26,9 +30,15 @@ function nullableText(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+/** numeric llega como número o como texto. undefined = no es un número válido. */
+function toPrice(value: unknown): number | undefined {
+  const price = typeof value === 'string' ? Number(value) : value;
+  return typeof price === 'number' && Number.isFinite(price) ? price : undefined;
+}
+
 /**
- * snake_case de Supabase → ExistingLabTest. price_bs es numeric: puede llegar
- * como número o como texto. Una fila con forma inesperada es un error, no se
+ * snake_case de Supabase → ExistingLabTest. Las tarifas son numeric: pueden
+ * llegar como número o como texto. Una fila con forma inesperada es un error, no se
  * adivina. El error solo nombra el id y la columna, nunca valores.
  */
 export function mapLabTestRow(row: LabTestRow): ExistingLabTest {
@@ -40,8 +50,16 @@ export function mapLabTestRow(row: LabTestRow): ExistingLabTest {
   if (typeof row.name !== 'string') throw fail('name');
   if (typeof row.active !== 'boolean') throw fail('active');
 
-  const price = typeof row.price_bs === 'string' ? Number(row.price_bs) : row.price_bs;
-  if (typeof price !== 'number' || !Number.isFinite(price)) throw fail('price_bs');
+  const price = toPrice(row.price_bs);
+  if (price === undefined) throw fail('price_bs');
+
+  // Las otras tres tarifas pueden faltar en exámenes cargados antes de existir.
+  const optionalPrice = (column: 'price_convenio_bs' | 'price_medicos_bs' | 'price_emergencia_bs') => {
+    if (row[column] === null) return null;
+    const value = toPrice(row[column]);
+    if (value === undefined) throw fail(column);
+    return value;
+  };
 
   return {
     id,
@@ -50,6 +68,9 @@ export function mapLabTestRow(row: LabTestRow): ExistingLabTest {
     category: nullableText(row.category),
     sampleType: nullableText(row.sample_type),
     priceBs: price,
+    priceConvenioBs: optionalPrice('price_convenio_bs'),
+    priceMedicosBs: optionalPrice('price_medicos_bs'),
+    priceEmergenciaBs: optionalPrice('price_emergencia_bs'),
     active: row.active,
     notes: nullableText(row.notes),
   };

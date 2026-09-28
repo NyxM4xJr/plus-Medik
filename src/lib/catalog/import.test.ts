@@ -7,11 +7,12 @@ import {
   type ExistingLabTest,
 } from './import';
 import { CATALOG_COLUMNS, validateCatalogCsv } from './validate';
+import { DEFAULT_TARIFFS, withTariffs } from '@/test/catalog-fixtures';
 
 const HEADER = CATALOG_COLUMNS.join(',');
 
 function report(...rows: string[]) {
-  return validateCatalogCsv([HEADER, ...rows].join('\n'));
+  return validateCatalogCsv([HEADER, ...rows.map(withTariffs)].join('\n'));
 }
 
 function existing(overrides: Partial<ExistingLabTest> & Pick<ExistingLabTest, 'id' | 'code' | 'name'>): ExistingLabTest {
@@ -19,6 +20,7 @@ function existing(overrides: Partial<ExistingLabTest> & Pick<ExistingLabTest, 'i
     category: null,
     sampleType: null,
     priceBs: 45,
+    ...DEFAULT_TARIFFS,
     active: true,
     notes: null,
     ...overrides,
@@ -49,6 +51,7 @@ describe('planCatalogImport: clasificación', () => {
           category: 'Hematología',
           sampleType: 'Sangre',
           priceBs: 45,
+          ...DEFAULT_TARIFFS,
           active: true,
           notes: null,
         },
@@ -68,6 +71,24 @@ describe('planCatalogImport: clasificación', () => {
       { field: 'notes', from: null, to: 'En ayunas' },
     ]);
     expect(plan.update[0].patch).toEqual({ name: 'Hemograma completo', priceBs: 50, notes: 'En ayunas' });
+  });
+
+  it('update: un cambio solo en una tarifa actualiza solo esa tarifa', () => {
+    const plan = planCatalogImport(
+      validateCatalogCsv([HEADER, 'HEM01,Hemograma,,Sangre,45,true,,30,40,65.5'].join('\n')),
+      [HEMOGRAMA],
+    );
+
+    expect(plan.update[0].changes).toEqual([{ field: 'priceEmergenciaBs', from: 60, to: 65.5 }]);
+    expect(plan.update[0].patch).toEqual({ priceEmergenciaBs: 65.5 });
+  });
+
+  it('update: un examen cargado antes de las tarifas (nulas) las recibe del archivo', () => {
+    const legacy = { ...HEMOGRAMA, priceConvenioBs: null, priceMedicosBs: null, priceEmergenciaBs: null };
+    const plan = planCatalogImport(report('HEM01,Hemograma,,Sangre,45,true,'), [legacy]);
+
+    expect(plan.update[0].patch).toEqual(DEFAULT_TARIFFS);
+    expect(plan.unchanged).toEqual([]);
   });
 
   it('unchanged: mismo contenido; 45 y 45.00 son el mismo precio', () => {

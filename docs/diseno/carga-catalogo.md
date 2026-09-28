@@ -381,7 +381,8 @@ rechazar `null` en `p_allow_mass_deactivation`.
 
 Diferencias o precisiones respecto de lo escrito arriba:
 
-- **`update` escribe las seis columnas comparables**, no solo las que
+- **`update` escribe todas las columnas comparables** (nueve desde las
+  cuatro tarifas), no solo las que
   cambiaron. El resultado es el mismo (las que no cambiaron reciben su propio
   valor) y la sentencia es de conjunto; la auditoría guarda el estado completo
   antes y después.
@@ -403,6 +404,13 @@ Diferencias o precisiones respecto de lo escrito arriba:
   (`is not true`). No quitarlos.
 - **Nombre:** la función se llama `apply_lab_catalog_import`, como en este
   diseño.
+- **Cuatro tarifas (2026-09-28):** la migración
+  `20260928120000_lab_test_tariffs.sql` reemplaza la función con la misma
+  firma. Cada fila lleva además `price_convenio_bs`, `price_medicos_bs` y
+  `price_emergencia_bs`, con las mismas reglas que `price_bs` (que es la
+  tarifa Paciente); las cuatro entran en la comparación, en `update` y en
+  `before`/`after` de la auditoría. Ver `docs/BITACORA.md`, registro
+  2026-09-28.
 - **`catalog:apply` compara una huella del plan completo** entre lo que vio el
   operador y el momento de aplicar, además de lo que compara la función. Eso
   cubre el límite de los cambios que se compensan, salvo en el intervalo

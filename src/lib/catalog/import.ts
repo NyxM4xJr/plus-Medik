@@ -16,7 +16,12 @@ export interface ExistingLabTest {
   name: string;
   category: string | null;
   sampleType: string | null;
+  /** Tarifa Paciente. */
   priceBs: number;
+  /** null en exámenes cargados antes de las cuatro tarifas. */
+  priceConvenioBs: number | null;
+  priceMedicosBs: number | null;
+  priceEmergenciaBs: number | null;
   active: boolean;
   notes: string | null;
 }
@@ -27,6 +32,9 @@ export interface LabTestValues {
   category: string | null;
   sampleType: string | null;
   priceBs: number;
+  priceConvenioBs: number;
+  priceMedicosBs: number;
+  priceEmergenciaBs: number;
   active: boolean;
   notes: string | null;
 }
@@ -46,7 +54,24 @@ export interface LabTestRepository extends LabTestReader {
 
 type ComparableField = keyof LabTestPatch;
 
-const COMPARABLE_FIELDS: ComparableField[] = ['name', 'category', 'sampleType', 'priceBs', 'active', 'notes'];
+const PRICE_FIELDS: ReadonlySet<ComparableField> = new Set([
+  'priceBs',
+  'priceConvenioBs',
+  'priceMedicosBs',
+  'priceEmergenciaBs',
+]);
+
+const COMPARABLE_FIELDS: ComparableField[] = [
+  'name',
+  'category',
+  'sampleType',
+  'priceBs',
+  'priceConvenioBs',
+  'priceMedicosBs',
+  'priceEmergenciaBs',
+  'active',
+  'notes',
+];
 
 export interface FieldChange {
   field: ComparableField;
@@ -123,18 +148,23 @@ function toCents(price: number): number {
 }
 
 function sameValue(field: ComparableField, a: unknown, b: unknown): boolean {
-  if (field === 'priceBs') return toCents(a as number) === toCents(b as number);
+  if (PRICE_FIELDS.has(field) && a !== null && b !== null) {
+    return toCents(a as number) === toCents(b as number);
+  }
   return a === b;
 }
 
 function valuesFromRow(row: ValidatedCatalogRow): LabTestValues {
-  // Solo se llama con filas ok: code, priceBs y active ya están validados.
+  // Solo se llama con filas ok: code, las cuatro tarifas y active ya están validados.
   return {
     code: row.code as string,
     name: row.name,
     category: row.category,
     sampleType: row.sampleType,
     priceBs: row.priceBs as number,
+    priceConvenioBs: row.priceConvenioBs as number,
+    priceMedicosBs: row.priceMedicosBs as number,
+    priceEmergenciaBs: row.priceEmergenciaBs as number,
     active: row.active as boolean,
     notes: row.notes,
   };

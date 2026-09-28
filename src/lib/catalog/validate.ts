@@ -16,9 +16,28 @@ export const CATALOG_COLUMNS = [
   'price_bs',
   'active',
   'notes',
+  'price_convenio_bs',
+  'price_medicos_bs',
+  'price_emergencia_bs',
 ] as const;
 
 export type CatalogColumn = (typeof CATALOG_COLUMNS)[number];
+
+/**
+ * Las cuatro tarifas de la lista de PlusMedik. price_bs es la tarifa Paciente
+ * (la columna original); las otras tres son columnas del mismo examen, no filas
+ * aparte. Todas son obligatorias y siguen las mismas reglas de formato.
+ */
+export const TARIFF_COLUMNS = ['price_bs', 'price_convenio_bs', 'price_medicos_bs', 'price_emergencia_bs'] as const;
+
+export type TariffColumn = (typeof TARIFF_COLUMNS)[number];
+
+const TARIFF_LABELS: Record<TariffColumn, string> = {
+  price_bs: 'Paciente',
+  price_convenio_bs: 'Convenio',
+  price_medicos_bs: 'Médicos',
+  price_emergencia_bs: 'Emergencia particular',
+};
 
 /** blocking: la fila no se puede importar. review: requiere aprobación humana. */
 export type IssueSeverity = 'blocking' | 'review' | 'warning';
@@ -65,7 +84,11 @@ export interface ValidatedCatalogRow {
   normalizedName: string;
   category: string | null;
   sampleType: string | null;
+  /** Tarifa Paciente. */
   priceBs: number | null;
+  priceConvenioBs: number | null;
+  priceMedicosBs: number | null;
+  priceEmergenciaBs: number | null;
   active: boolean | null;
   notes: string | null;
   issues: CatalogIssue[];
@@ -87,7 +110,7 @@ export interface CatalogValidationReport {
   };
 }
 
-/** numeric(10,2) en lab_tests.price_bs. */
+/** numeric(10,2) en las columnas de tarifa de lab_tests. */
 const MAX_PRICE_BS = 99_999_999.99;
 const PRICE_FORMAT = /^\d+(\.\d{1,2})?$/;
 const ACTIVE_VALUES: Record<string, boolean> = {
@@ -118,31 +141,36 @@ function optional(value: string | undefined): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-function parsePrice(raw: string, line: number): { price: number | null; issue: CatalogIssue | null } {
+function parsePrice(
+  raw: string,
+  line: number,
+  field: TariffColumn,
+): { price: number | null; issue: CatalogIssue | null } {
   const value = raw.trim();
+  const label = `Precio ${TARIFF_LABELS[field]}`;
   const issue = (kind: IssueKind, message: string): CatalogIssue => ({
     severity: 'blocking',
     kind,
     message,
     line,
-    field: 'price_bs',
+    field,
   });
 
-  if (value === '') return { price: null, issue: issue('missing_price', 'Falta el precio.') };
+  if (value === '') return { price: null, issue: issue('missing_price', `Falta el ${label.toLowerCase()}.`) };
   if (value.startsWith('-')) {
-    return { price: null, issue: issue('negative_price', `Precio negativo: «${value}».`) };
+    return { price: null, issue: issue('negative_price', `${label} negativo: «${value}».`) };
   }
   if (!PRICE_FORMAT.test(value)) {
     const hint = value.includes(',')
       ? ' Usa punto como separador decimal (45.50), sin separador de miles.'
       : ' Formato esperado: número con hasta 2 decimales (45 o 45.50), sin «Bs».';
-    return { price: null, issue: issue('invalid_price', `Precio inválido: «${value}».${hint}`) };
+    return { price: null, issue: issue('invalid_price', `${label} inválido: «${value}».${hint}`) };
   }
 
   const price = Number(value);
-  if (price === 0) return { price: null, issue: issue('zero_price', 'El precio no puede ser 0.') };
+  if (price === 0) return { price: null, issue: issue('zero_price', `${label} no puede ser 0.`) };
   if (price > MAX_PRICE_BS) {
-    return { price: null, issue: issue('price_out_of_range', `Precio fuera de rango: «${value}».`) };
+    return { price: null, issue: issue('price_out_of_range', `${label} fuera de rango: «${value}».`) };
   }
 
   return { price, issue: null };
@@ -319,8 +347,12 @@ export function validateCatalogCsv(csv: string): CatalogValidationReport {
       });
     }
 
-    const { price, issue: priceIssue } = parsePrice(cell('price_bs'), record.line);
-    if (priceIssue) issues.push(priceIssue);
+    const prices = {} as Record<TariffColumn, number | null>;
+    for (const field of TARIFF_COLUMNS) {
+      const { price, issue: priceIssue } = parsePrice(cell(field), record.line, field);
+      if (priceIssue) issues.push(priceIssue);
+      prices[field] = price;
+    }
 
     const { active, issue: activeIssue } = parseActive(cell('active'), record.line);
     if (activeIssue) issues.push(activeIssue);
@@ -334,7 +366,10 @@ export function validateCatalogCsv(csv: string): CatalogValidationReport {
       normalizedName,
       category: optional(cell('category')),
       sampleType,
-      priceBs: price,
+      priceBs: prices.price_bs,
+      priceConvenioBs: prices.price_convenio_bs,
+      priceMedicosBs: prices.price_medicos_bs,
+      priceEmergenciaBs: prices.price_emergencia_bs,
       active,
       notes: optional(cell('notes')),
       issues,

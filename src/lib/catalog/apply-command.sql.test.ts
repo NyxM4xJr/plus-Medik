@@ -12,8 +12,9 @@ import {
   type CatalogApplyRpc,
 } from './apply-command';
 import type { LabTestReader } from './import';
-import { mapLabTestRow } from './supabase-reader';
+import { LAB_TEST_COLUMNS, mapLabTestRow } from './supabase-reader';
 import { CATALOG_COLUMNS } from './validate';
+import { DEFAULT_TARIFFS, withTariffs } from '@/test/catalog-fixtures';
 
 /**
  * catalog:apply de punta a punta contra apply_lab_catalog_import en PGlite,
@@ -23,19 +24,22 @@ import { CATALOG_COLUMNS } from './validate';
 
 const HEADER = CATALOG_COLUMNS.join(',');
 const TARGET = 'pglite';
+const INSERT_LAB_TEST =
+  'insert into lab_tests (code, name, sample_type, price_bs, price_convenio_bs, price_medicos_bs, ' +
+  'price_emergencia_bs, active) values ($1, $2, $3, $4, $5, $6, $7, $8)';
 
 let db: PGlite;
 
 type Json = Record<string, unknown>;
 
 function csv(...rows: string[]): string {
-  return [HEADER, ...rows].join('\n');
+  return [HEADER, ...rows.map(withTariffs)].join('\n');
 }
 
 const reader: LabTestReader = {
   async list() {
     const { rows } = await db.query<Json>(
-      'select id, code, name, category, sample_type, price_bs, active, notes from lab_tests order by id',
+      `select ${LAB_TEST_COLUMNS} from lab_tests order by id`,
     );
     return rows.map((row) => mapLabTestRow(row as never));
   },
@@ -92,11 +96,14 @@ async function run(text: string, options: Partial<ApplyOptions>, rpc = pgliteRpc
 
 async function seed(tests: Array<{ code: string | null; name: string; price?: number; active?: boolean }>) {
   for (const t of tests) {
-    await db.query('insert into lab_tests (code, name, sample_type, price_bs, active) values ($1, $2, $3, $4, $5)', [
+    await db.query(INSERT_LAB_TEST, [
       t.code,
       t.name,
       'Sangre',
       t.price ?? 45,
+      DEFAULT_TARIFFS.priceConvenioBs,
+      DEFAULT_TARIFFS.priceMedicosBs,
+      DEFAULT_TARIFFS.priceEmergenciaBs,
       t.active ?? true,
     ]);
   }

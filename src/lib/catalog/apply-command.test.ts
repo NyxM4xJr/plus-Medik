@@ -20,17 +20,18 @@ import {
 } from './apply-command';
 import type { ExistingLabTest, LabTestReader } from './import';
 import { CATALOG_COLUMNS, validateCatalogCsv } from './validate';
+import { DEFAULT_TARIFFS, withTariffs } from '@/test/catalog-fixtures';
 
 const HEADER = CATALOG_COLUMNS.join(',');
 const TARGET = 'proyecto-prueba';
 const PHRASE = `aplicar ${TARGET}`;
 
 function lab(overrides: Partial<ExistingLabTest> & Pick<ExistingLabTest, 'id' | 'code' | 'name'>): ExistingLabTest {
-  return { category: null, sampleType: 'Sangre', priceBs: 45, active: true, notes: null, ...overrides };
+  return { category: null, sampleType: 'Sangre', priceBs: 45, ...DEFAULT_TARIFFS, active: true, notes: null, ...overrides };
 }
 
 function csv(...rows: string[]): string {
-  return [HEADER, ...rows].join('\n');
+  return [HEADER, ...rows.map(withTariffs)].join('\n');
 }
 
 /** Lector que devuelve un estado distinto en cada llamada (el último se repite). */
@@ -270,6 +271,9 @@ describe('buildRpcRows', () => {
         category: null,
         sample_type: 'Sangre',
         price_bs: '45.50',
+        price_convenio_bs: '30.00',
+        price_medicos_bs: '40.00',
+        price_emergencia_bs: '60.00',
         active: true,
         notes: null,
         status: 'ok',
