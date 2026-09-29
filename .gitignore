@@ -10,3 +10,13 @@ supabase/.temp/
 *.tsbuildinfo
 .vercel
 .env*
+.catalog-private/
+
+# Recetas u otras imágenes de prueba sueltas en la raíz: pueden tener datos de pacientes.
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+/*.heic
+/*.pdf
+/imgsPrueba/
