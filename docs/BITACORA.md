@@ -541,6 +541,97 @@ npm run prescription:batch -- imgsPrueba
 
 ## Registro
 
+### 2026-09-29 — Decisiones del laboratorio sobre nombres; propuesta de abreviaturas
+
+- Respuestas del laboratorio (vía el responsable del proyecto):
+  - «glicemia» / «glucosa en ayunas» = GLUCOSA basal. Postcarga o
+    postprandial solo si el médico lo especifica.
+  - «PPF» no es una abreviatura común: sin alias, se sigue preguntando.
+  - «electrolitos» = IONOGRAMA 1 (sodio, potasio, cloro). También existen
+    IONOGRAMA 2 (con calcio iónico) y cada analito por separado.
+  - GRUPO SANGUÍNEO siempre incluye el factor Rh: no van por separado.
+  - «calcio» sin especificar = CALCIO IÓNICO.
+- Propuesta del responsable del proyecto: cuando el médico no especificó la
+  variante y no tuvo intención de hacerlo, cotizar **todas** las opciones con
+  su precio y un aviso, para que el paciente decida sin idas y vueltas.
+- **Acuerdo: los exámenes distintos no se mezclan nunca.** Cotizar todas las
+  opciones aplica solo al mismo examen con otra técnica. Exámenes distintos
+  con nombre parecido (Vitamina D 25-OH frente a 1,25; PCR cualitativa
+  frente a cuantitativa; LDH en sangre frente a líquidos; HIV tamizaje
+  frente a Western Blot) son exámenes diferentes: cotizar el más barato
+  haría el examen equivocado.
+- **Reglas propuestas para identificar variantes** (principio: ante la duda,
+  preguntar; una pregunta de más cuesta un mensaje, una cotización
+  equivocada cuesta un examen equivocado). **Pendientes de visto bueno del
+  responsable del proyecto; no implementadas.**
+  1. **Decide el laboratorio, no el agente.** Hoy `identify()` deduce «mismo
+     examen, otra técnica» por el nombre (`METHOD_WORDS`) y pregunta entre
+     ellas. Con las reglas nuevas, cotizar todas las opciones solo se hará
+     en grupos que el laboratorio aprobó como mismo examen (columna `tipo` =
+     «varias técnicas» de la planilla de abreviaturas, confirmada en
+     `decision_laboratorio`). Lo que no esté aprobado: se pregunta. La
+     heurística del nombre solo propone, no decide.
+  2. **Lo que escribió el médico manda.** Si la receta dice «TSH ECLIA», se
+     cotiza solo esa. Todas las técnicas solo si no escribió ninguna. En ese
+     caso: una línea por técnica con su precio, aviso de que la orden no
+     indica la técnica, y total en rango (mínimo a máximo).
+  3. **Exámenes distintos: no se suman y el paciente no elige a ciegas.** No
+     entran al total (subtotal parcial, como ya funciona). Las opciones se
+     muestran **sin precio**, para que no se elija por el más barato; se pide
+     confirmar con el médico o una foto más clara, y el precio se da al
+     confirmar. Si el paciente no sabe: pasa a una persona del laboratorio
+     (takeover). El agente nunca elige.
+  4. **Indicador de cero tolerancia.** En la evaluación con las 23 recetas se
+     cuentan aparte los exámenes cotizados equivocados. Ningún cambio de
+     identificación pasa a producción si no es 0. Las preguntas de más se
+     toleran.
+- Pregunta abierta al laboratorio: ¿es clínicamente indistinto cotizar ECLIA
+  o FIA (o CLIA) en los 5 grupos de técnicas (TSH, PSA, Ferritina,
+  Vitamina D 25-OH, Anti-tiroglobulina)? Si en alguno no da igual, ese grupo
+  pasa a «preguntar».
+- Propuesta de 53 abreviaturas y nombres comunes (HC, VES, EGO, TGO/TGP,
+  HbA1c, TP/TTP, BHCG…) con código, nombre y Precio Paciente del catálogo
+  cargado, clasificadas en directo, confirmado, varias técnicas, preguntar,
+  sin alias y perfil. Archivo privado fuera del repo:
+  `CLIENTES/PlusMedik/privado/alias/propuesta-abreviaturas-2026-09-29.csv`,
+  con la columna `decision_laboratorio` vacía para su revisión. Todos los
+  códigos se verificaron contra el catálogo cargado. No se cargó ningún alias.
+- Perfiles (lipídico, hepatograma, tiroideo) y sus precios: el laboratorio
+  enviará un Excel; se agregarán como datos nuevos, no como alias.
+- Pendiente: construir la carga de alias (dry-run por defecto, transacción,
+  auditoría; un alias genérico apunta a todas sus variantes).
+
+**Estado al cierre del 2026-09-29 (leer antes de continuar):**
+
+- Producción: webhook en Vercel (`plusmedik`) en modo observer; catálogo con
+  4 tarifas cargado en Supabase (542 exámenes). La lectura de recetas existe
+  solo como comando local (`prescription:analyze`, `prescription:batch`),
+  **no está conectada a WhatsApp**.
+- Hecho: identificación por contenido (24 → 46 de 100 exámenes
+  identificados); decisiones del laboratorio registradas arriba; propuesta
+  privada de 53 abreviaturas enviada a revisión.
+- Siguiente, en este orden, **solo con visto bueno del responsable del
+  proyecto**:
+  1. Implementar las reglas 1–4 de esta entrada y medirlas con las mismas
+     lecturas guardadas (indicador «cotizado equivocado» = 0).
+  2. Hacer que `prescription:batch` guarde las lecturas crudas (JSON) y un
+     comando que las reanalice sin llamar al modelo (el lector no es
+     determinista).
+  3. Carga de alias cuando el laboratorio devuelva la planilla revisada.
+  4. Conciliar el Excel «ACTUALIZADO» **por nombre y muestra** contra los
+     códigos existentes: el «Nro.» del Excel es número de fila, no código
+     (las filas después de 192 se corrieron −2). **No aplicar** el plan en
+     `.catalog-private/` (349 actualizaciones): está mal emparejado.
+     Cambios esperados: desactivar 193/194; actualizar 188 Renina y 189
+     Serotonina con los datos finales; mantener lo decidido para 126
+     (Paciente toma el precio mayor) y 7/410 (sin tipo de muestra).
+  5. Mover los datos privados (carpeta de preparación del catálogo en el
+     Escritorio y `.catalog-private/`) a `CLIENTES/PlusMedik/privado/`,
+     fuera del repo.
+- Después: perfiles con precios (Excel del laboratorio); qué responder a
+  estudios que no son de laboratorio (ecografía, placa, endoscopia);
+  calibrar el umbral de 60 % con la planilla revisada.
+
 ### 2026-09-29 — Identificación por contenido: de 24 a 46 de 100
 
 - Pedido del responsable del proyecto tras revisar el reporte: cuando el
