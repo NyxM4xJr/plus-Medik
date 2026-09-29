@@ -34,6 +34,7 @@ No anotar aquí secretos, teléfonos, nombres de pacientes ni contenido clínico
 | `maxDuration` del webhook | `30` s | `route.ts` | Tiempo máximo de ejecución en Vercel. Pasado este tiempo la función muere y el evento queda en `processing`. | Si se sube, `WEBHOOK_PROCESSING_STALE_SECONDS` debe seguir siendo mayor. |
 | `WEBHOOK_PROCESSING_STALE_SECONDS` | `120` | RPC `claim_webhook_event` | Segundos tras los cuales un evento en `processing` se da por muerto y un reintento de Kapso lo vuelve a reclamar. Se mide desde `claimed_at` (o `received_at` en filas anteriores a la migración). Mínimo 60, y siempre mayor que `maxDuration`. | Muy bajo: un intento vivo y su reintento procesan el mismo evento a la vez. Muy alto: si Kapso deja de reintentar antes, el mensaje se pierde. |
 | `webhook_attribution_debug.expires_at` | `now() + 7 días` | Migración `20260923013716` | Marca de expiración del diagnóstico. **Nada borra esas filas todavía.** | La tabla crece indefinidamente. |
+| `PRESCRIPTION_MIN_CONFIDENCE` (umbral, no tiempo) | `0.6` | `prescription:analyze` → `analyzePrescription` | Confianza mínima de lectura de la receta, de identificación en el catálogo y de calidad de imagen para cotizar. Por debajo se pide confirmación. Inclusivo (0.6 exacto cotiza). Número en (0, 1]; vacía o inválida, el comando no arranca. **Provisional**: calibrar con recetas reales autorizadas. No es el `FUZZY_CONFIDENT_SCORE` de la búsqueda. Solo local por ahora. | Muy bajo: se cotizan exámenes mal leídos o mal identificados. Muy alto: casi todas las recetas piden confirmación. |
 | `CATALOG_MAX_DEACTIVATIONS` (límite, no tiempo) | `10` | `catalog:apply` → `p_max_deactivations` de `apply_lab_catalog_import` | Desactivaciones permitidas en una carga sin `--allow-mass-deactivation`. Entero ≥ 0; sin definir = 10; vacía o con otro formato, el comando no arranca. Queda en `lab_catalog_imports.max_deactivations`. Solo se lee en la máquina local (`.env.local`), no en Vercel. | Muy bajo: cualquier carga pide la bandera y se vuelve rutina. Muy alto: un CSV incompleto desactiva medio catálogo sin autorización especial. |
 
 Los valores 60 s / 600 s son iniciales y deben ajustarse en las pruebas previas
@@ -296,8 +297,208 @@ Umbrales (`FUZZY_MIN_SCORE` 0.35 en SQL, `FUZZY_CONFIDENT_SCORE` 0.6 y
 `CLOSE_SCORE_DELTA` 0.1 en TypeScript) son **provisionales**: se calibran con
 el catálogo real y consultas reales de pacientes.
 
+## Recetas: lectura de imágenes
+
+Código: `src/lib/prescription/reading.ts` (esquema y prompt), `reader.ts`
+(contrato común) y un lector por proveedor. El modelo **solo transcribe**
+exámenes solicitados; identificar, decidir y cotizar se hace en código, igual
+para cualquier proveedor.
+
+- **Proveedor** con `PRESCRIPTION_PROVIDER`: `openai` (predeterminado,
+  `gpt-5-mini`, `openai-reader.ts`) o `anthropic` (`claude-opus-5`,
+  `claude-reader.ts`). Mismo prompt y mismo esquema en ambos.
+- OpenAI: API Responses, `text.format` JSON Schema con `strict: true`,
+  imágenes con `detail: "high"` y `store: false` (que OpenAI no guarde la
+  respuesta). Una respuesta `incomplete` o un `refusal` no producen análisis.
+- Claude: modelo `claude-opus-5`, pensamiento adaptativo, salida estructurada con
+  JSON Schema (`output_config.format`) y `fallbacks: "default"` (beta
+  `server-side-fallback-2026-07-01`): si un clasificador de seguridad declina,
+  la API reintenta con el modelo de respaldo en la misma llamada. Se registra
+  el modelo que respondió.
+- Varias imágenes por llamada (páginas de la misma orden), numeradas.
+- Por examen: `text` (tal como está escrito), `interpretation` (nombre
+  completo si es sigla; si no, null), `mark` (`tick`, `cross`, `highlight`,
+  `circle`, `handwritten`, `other`), `confidence` (0–1: solicitado y bien
+  leído) e `image`. Por receta: `is_lab_order`, `image_quality`, `issues`.
+- En formularios impresos, solo cuentan los exámenes marcados. Lo escrito a
+  mano por el médico cuenta como solicitado.
+- Una misma línea manuscrita puede pedir varios exámenes: separar estudios
+  independientes unidos por «+», «y» o comas. Conservar calificadores como
+  «cuantitativo» y no dividir nombres de perfiles o paneles del catálogo.
+- **Privacidad:** el prompt prohíbe transcribir nombres, documentos,
+  teléfonos, direcciones o diagnósticos. Solo exámenes.
+- La salida se vuelve a validar con zod (rangos 0–1, marcas conocidas). Un
+  rechazo, un corte por `max_tokens` o una salida inválida no producen
+  análisis: la receta pasa a una persona.
+
+## Recetas: identificación en el catálogo
+
+Código: `identify()` en `src/lib/prescription/analyze.ts`. Decide a qué examen
+del catálogo corresponde cada examen leído. **Nunca elige entre dos
+variantes reales**: si queda más de una, pregunta.
+
+Orden de decisión (el primero que decide, gana):
+
+1. **Exacto** (nombre o alias, de `search_lab_catalog`): uno → identificado
+   (confianza 1); varios → pregunta entre ellos.
+2. **Por contenido, sobre todo el catálogo activo** (se lee una vez por
+   análisis, no depende del límite de la búsqueda). Palabras normalizadas con
+   `normalizeLabText`, sin palabras vacías (`de`, `del`, `la`, `las`, `el`,
+   `los`, `en`, `y`, `por`, `para`, `con`; **no** `a`, `e`, `o`: distinguen
+   «Vitamina A», «Hepatitis E»).
+   - Candidatos cuyo nombre contiene todas las palabras de lo escrito o de la
+     interpretación.
+   - Entre ellos, los «directos» solo agregan palabras de método (`eclia`,
+     `clia`, `elisa`, `fia`, `fluorescencia`, `quimioluminiscencia`,
+     `automatizado/a`, `convencional`) o números. Un directo → identificado;
+     varios → pregunta entre ellos (ej. TSH ECLIA / FIA).
+   - Si no hay directos, los «cercanos» agregan como máximo
+     `MAX_EXTRA_WORDS` = 4 palabras. Uno → identificado; varios → pregunta.
+     Los paneles que mencionan lo escrito entre decenas de palabras nunca se
+     aceptan solos.
+   - Si nadie contiene lo escrito: el nombre completo del catálogo dentro del
+     **texto del médico** (nunca de la interpretación del modelo), sobrando
+     solo calificadores inofensivos (`serica`, `serico`). Las muestras
+     («orina», «heces») no son inofensivas: distinguen variantes.
+   - Confianza de una identificación por contenido:
+     `CONTAINED_MATCH_CONFIDENCE` = 0.9 (la lectura decide si pasa el umbral).
+3. **Difuso** (pg_trgm), como en la búsqueda textual. Si el límite cortó
+   candidatos, nada difuso es único. Parecidos lejanos: pide aclaración sin
+   ofrecer opciones.
+
+- Opciones al paciente: hasta 5, con Precio Paciente; nombres de más de 80
+  caracteres se recortan.
+- Búsqueda en recetas con límite 10 (`PRESCRIPTION_SEARCH_LIMIT`).
+- Cada examen analizado lleva `basis` (`exact`, `contained`, `fuzzy`,
+  `none`), visible en el reporte y en la planilla de revisión.
+- **Lo que esta regla no resuelve** (se resuelve con alias revisados por el
+  laboratorio): variante por defecto cuando el médico no especifica el método
+  (TSH, Vitamina D, PCR, LDH, Anti-tiroglobulina, HIV); nombres distintos
+  («glicemia» → GLUCOSA, «PPF» → parasitológico seriado); perfiles que son
+  varios exámenes («perfil lipídico», «hepatograma»).
+
+### Auditoría: qué revisar cuando cambie esta lógica
+
+- Correr `npm test` (casos reales en `analyze.test.ts`, describe
+  «identify: por contenido sobre todo el catálogo»).
+- Medir con las mismas lecturas, no solo con una corrida nueva: el lector no
+  lee igual en cada corrida (ver registro 2026-09-29). Comparar contra la
+  base del registro y revisar **cada** asignación por contenido nueva: un
+  «identificado» equivocado cotiza un precio equivocado; un «pregunta» de más
+  solo cuesta un mensaje.
+- Buscar especialmente: variantes con palabras de muestra o técnica que se
+  pierden, paneles aceptados como examen simple, palabras de una o dos
+  letras que cambian el examen.
+
+## Recetas: análisis y confirmación
+
+Código: `src/lib/prescription/analyze.ts`, `preparation.ts` y `reply.ts`.
+
+- Cada examen se identifica con `identify()` (sección «Recetas:
+  identificación en el catálogo»): exacto, por contenido o difuso.
+- Una frase difusa bajo 60% pide aclaración sin asignar el mejor candidato. Si
+  otros exámenes sí son identificables y la imagen tiene calidad suficiente,
+  se cotizan esas líneas como subtotal parcial; nunca se les llama total ni se
+  incluye el examen pendiente. Imagen global de baja calidad bloquea incluso
+  el subtotal parcial.
+- Confianza del examen = mín(lectura, identificación). Identificación: 1 si
+  la coincidencia es exacta; el puntaje difuso si es `fuzzy_clear`; 0 si no
+  hay una sola coincidencia.
+- Estados: `identified`; `needs_confirmation` (lectura o identificación bajo
+  el umbral, o varias variantes: se ofrecen hasta 5 opciones, **nunca se
+  elige una; un candidato difuso bajo el umbral también pide confirmación);
+  `not_identified` (sin candidatos: lo revisa una persona).
+- Decisión: `quote` solo si **todos** los exámenes están `identified` y la
+  calidad de imagen alcanza el umbral. Si hay dudas, `confirm`: cuando la
+  calidad alcanza el umbral, la respuesta puede mostrar como **subtotal
+  parcial** solo los exámenes identificados con confianza y pedir aclaración
+  para el resto. Nunca elige un candidato dudoso ni incluye su precio. Una
+  imagen de calidad global baja bloquea incluso el subtotal. Además `retake`
+  (sin exámenes e imagen mala), `not_lab_order` y `no_exams`.
+- Un mismo examen leído dos veces cuenta una vez. Un examen que se desactiva
+  entre la búsqueda y la cotización no se cotiza.
+- Cotización: Precio Paciente (`price_bs`), tipo de muestra, preparación y
+  tiempo de entrega (de `notes`), y total en centavos.
+- Preguntas al paciente: reglas fijas sobre el texto de preparación del
+  laboratorio (ayuno con sus horas, medicación o suplementos, ciclo
+  menstrual, abstinencia, antibióticos). Cada pregunta nombra los exámenes
+  que la motivan. Las horas de ayuno solo se toman de frases atadas a
+  «ayuno»; en el catálogo cargado se obtienen en 340 de 348 exámenes con
+  ayuno (el resto pregunta sin horas).
+
+## Recetas: comando
+
+```bash
+npm run prescription:analyze -- ruta/foto1.jpg [ruta/foto2.jpg ...]
+```
+
+- **Siempre dry-run**: lee las fotos del disco, llama al proveedor configurado
+  (`openai` por defecto o `anthropic`), busca en el catálogo (solo lectura) y
+  muestra el análisis y el borrador de respuesta
+  marcado «NO enviado». No escribe en la base ni envía WhatsApp. No admite
+  opciones.
+- Necesita `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` y la clave del
+  proveedor en `.env.local`: `OPENAI_API_KEY` (predeterminado) o, con
+  `PRESCRIPTION_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`. Umbral en
+  `PRESCRIPTION_MIN_CONFIDENCE`.
+- Las imágenes de prueba van en `imgsPrueba/` (ignorada entera), fuera del
+  repo o sueltas en la raíz (`.gitignore` ignora `/*.jpg`, `/*.jpeg`,
+  `/*.png`, …): el repo es público y una receta tiene datos de pacientes.
+  Ejemplo: `npm run prescription:analyze -- imgsPrueba\prueba2.jpeg`.
+- Formatos: JPG, PNG, WEBP, GIF. Cada ejecución **cuesta** una llamada a la
+  API del proveedor configurado.
+- Ninguna ruta de `src/app` importa el lector ni el SDK de Anthropic (lo
+  comprueba un test).
+
+## Recetas: evaluación por lotes
+
+```bash
+npm run prescription:batch -- imgsPrueba
+```
+
+- Analiza en DRY-RUN todas las imágenes de una carpeta. «pruebaX-1.jpeg» y
+  «pruebaX-2.jpeg» son la misma cotización. En serie, un error en una
+  cotización no detiene las demás.
+- Deja en `<carpeta>/resultados/` una planilla `revision-<fecha>.csv` («;» y
+  BOM, abre en Excel en español) con una fila por examen leído y columnas
+  vacías `correcto_si_no`, `examen_correcto` y `notas` para el revisor; los
+  exámenes que el lector no vio se agregan como filas nuevas. También un
+  `reporte-<fecha>.txt` con el análisis y el borrador de cada cotización.
+- La consola solo muestra totales. La carpeta debe estar fuera del repo o
+  ignorada (`imgsPrueba/` lo está): contiene recetas y resultados de pacientes.
+- La planilla revisada es el set de prueba para medir cada cambio de prompt,
+  alias o umbral antes de aceptarlo.
+
 ## Pendientes
 
+- **Función principal futura: cotizar recetas desde imágenes.** El agente debe
+  identificar los exámenes seleccionados en la receta (marcados con tick,
+  resaltados o encerrados), buscar sus variantes en el catálogo y preparar la
+  cotización con Precio Paciente. Debe incluir tipo de muestra, instrucciones
+  de toma/preparación y preguntar las condiciones del paciente que sean
+  relevantes para esos exámenes. Si la lectura visual o la identificación del
+  examen no alcanza el umbral provisional de 60%, debe pedir confirmación antes
+  de cotizar. Este umbral es de confianza de imagen/identificación; no es el
+  `FUZZY_CONFIDENT_SCORE` de búsqueda textual (0.6). **Construido en
+  dry-run** (registro 2026-09-28, «Análisis de recetas»). Falta:
+  - probarlo con recetas reales **autorizadas** y calibrar el 60% (medir
+    cuántas confirmaciones pide y cuántos errores deja pasar);
+  - conectarlo a los bloques reales: descargar la imagen desde Kapso, correr
+    el análisis cuando el bloque esté listo (no hay worker) y guardar el
+    resultado (`agent_message_attachments.interpretation_status` ya existe);
+  - órdenes en PDF (hoy solo imágenes);
+  - medir costo y latencia por receta;
+  - enviar la respuesta: **no autorizado**; sigue en modo observer.
+- **Sincronizar catálogo con el Excel actualizado del 2026-09-29.** El archivo
+  local tiene 540 filas frente a 542 exámenes activos en Supabase y cambió
+  información de catálogo. Generar un CSV privado de cuatro tarifas, correr
+  `catalog:plan` y revisar cada cambio y las posibles desactivaciones antes de
+  autorizar otra carga. No usar códigos del Excel para evaluar matching hasta
+  reconciliar los datos.
+- **Alias desde conversaciones son apoyo, no el flujo principal.** Sirven para
+  resolver cómo escribe el usuario cuando una receta es difícil de leer o para
+  desambiguar una consulta; no sustituyen la lectura de recetas. Las propuestas
+  derivadas de mensajes deben revisarse antes de cargarlas.
 - **La bienvenida automática de WhatsApp Business activa el takeover.** Ver
   registro 2026-09-26. Hay que resolverlo **antes de activar respuestas
   automáticas**: hoy cada cliente que recibe ese mensaje pausa al agente 30
@@ -339,6 +540,146 @@ el catálogo real y consultas reales de pacientes.
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-09-29 — Identificación por contenido: de 24 a 46 de 100
+
+- Pedido del responsable del proyecto tras revisar el reporte: cuando el
+  examen se lee bien y tiene una sola opción razonable en el catálogo, debe
+  cotizarse; solo debe preguntar cuando de verdad hay varias variantes.
+- Causa: la identificación era por parecido difuso con el nombre completo, y
+  el catálogo lleva el método en el nombre («TSH (ECLIA)», «HEMOGRAMA
+  COMPLETO AUTOMATIZADO»). Además ofrecía opciones ajenas («Vitamina A» para
+  «25-OH Vitamina D»).
+- Cambio: identificación por contenido sobre todo el catálogo, con las reglas
+  de «Recetas: identificación en el catálogo». Opciones con precio.
+- Medición con **las mismas 100 lecturas** de la primera corrida
+  (`revision-202609290647.csv`, sin volver a llamar al modelo):
+  identificados 24 → 46 (12 exactos, 29 por contenido, 5 difusos); pregunta
+  entre variantes reales 12; aclaración sin opciones 24; no encontrados 16.
+- Errores encontrados al revisar cada asignación y corregidos antes de
+  aceptar: «PCR cuantitativo» → «PCR SEMI CUANTITATIVO» (la búsqueda no
+  traía la otra variante; ahora el contenido se busca en todo el catálogo);
+  «Toxoplasmosis IgG Elisa» → «INMUNOGLOBULINA IgG» (usaba la interpretación
+  larga del modelo; ya no); «Hepatitis B Ag. Sup.» ofrecía «HEPATITIS E»
+  («e» era palabra vacía; ya no); «Micrometodo (T. cruzi)» → panel de fiebre
+  tropical de 21 patógenos (ahora un panel no se acepta solo).
+- **Hallazgo: el lector no es determinista.** Una segunda corrida sobre las
+  mismas 25 imágenes leyó 91 exámenes en lugar de 100 y marcó 2 fotos como
+  `retake`. Para comparar cambios de identificación se reaplica sobre
+  lecturas guardadas; falta que `prescription:batch` guarde las lecturas
+  crudas (JSON) y un comando que las reanalice sin llamar al modelo.
+- Pendiente del laboratorio: variante por defecto para TSH, Vitamina D,
+  PCR, LDH, Anti-tiroglobulina, HIV; alias de nombres distintos; perfiles;
+  qué responder a estudios que no son de laboratorio.
+
+### 2026-09-29 — Primera medición con 23 recetas reales (GPT-5 mini)
+
+- `prescription:batch` sobre 23 cotizaciones (25 imágenes) en `imgsPrueba/`,
+  proveedor OpenAI `gpt-5-mini`, umbral 60%. Sin errores de lectura.
+- Decisiones: 1 `quote`, 21 `confirm`, 1 `no_exams`. Exámenes leídos: 100;
+  identificados 24, por confirmar 52 (41 por identificación baja, 10 por
+  varias variantes, 1 por lectura baja) y no identificados 24.
+- **La lectura funciona; falla la identificación.** 99 de 100 lecturas
+  superan el 60%. Los nombres del catálogo llevan el método («TSH (ECLIA)»,
+  «HEMOGRAMA COMPLETO AUTOMATIZADO», «PROCALCITONINA (FIA Fluorescencia)») y
+  los médicos no: la similitud difusa cae bajo el umbral. Además hay nombres
+  comunes sin equivalente directo («glicemia» → GLUCOSA), perfiles que en el
+  catálogo son varios exámenes («perfil lipídico», «hepatograma») y estudios
+  que no son de laboratorio (ecografía, placa de tórax, endoscopia).
+- Algunas `interpretation` del modelo vienen en inglés («complete blood
+  count»): el prompt debe pedirlas en español, como las nombra un
+  laboratorio boliviano.
+- Próximos pasos: alias revisados por el laboratorio (con una variante por
+  defecto cuando hay métodos distintos), representar perfiles, distinguir
+  estudios que no son de laboratorio, y revisar la planilla para tener el
+  set de prueba. Los resultados quedan en `imgsPrueba/resultados/`, fuera de
+  git.
+
+### 2026-09-29 — Lector de recetas con GPT-5 mini (predeterminado)
+
+- A pedido del responsable del proyecto, el lector predeterminado pasa a
+  `gpt-5-mini` de OpenAI por costo (estimación de Codex: ~US$1.2–1.6 por
+  1,000 imágenes; no verificada aquí). El lector de Claude queda como
+  alternativa (`PRESCRIPTION_PROVIDER=anthropic`) para comparar con las
+  mismas recetas antes de fijar uno. Dependencia nueva `openai`.
+- `.gitignore` ignora imágenes y PDF sueltos en la raíz: había una receta de
+  prueba sin ignorar en un repo público.
+- Primera prueba real (GPT-5 mini, una receta manuscrita de un examen, foto
+  rotada y parcialmente tapada): examen identificado y cotizado
+  correctamente, verificado a mano contra la lista de precios. Lectura y
+  calidad de imagen reportadas **exactamente en 0.60**, el umbral: cotizó por
+  ser inclusivo. Hay que ver en más pruebas si GPT-5 mini tiende a responder
+  0.60 redondo en casos dudosos; si es así, el umbral inclusivo es frágil.
+- Ajuste por esa prueba: la pregunta de medicación se activaba con
+  «tratamiento con antibiótico»; ahora ese caso solo genera la pregunta de
+  antibióticos (también se excluye «tratamiento de óvulos/cremas»).
+
+### 2026-09-28 — Análisis de recetas (dry-run, sin conectar a WhatsApp)
+
+- Nuevo `src/lib/prescription/` y comando `npm run prescription:analyze`.
+  Reglas en «Recetas: lectura de imágenes», «Recetas: análisis y
+  confirmación» y «Recetas: comando». Dependencia nueva `@anthropic-ai/sdk`.
+- Decisión: el modelo solo transcribe; la identificación, el umbral, la
+  cotización y las preguntas al paciente son código determinista y probado.
+  Así un error del modelo se ve como baja confianza o «no identificado», no
+  como un precio equivocado.
+- Decisión inicial: con cualquier examen dudoso la respuesta pedía confirmación
+  y no mostraba precios, ni siquiera de los exámenes seguros. La entrada
+  2026-09-29 documenta el cambio a subtotal parcial para reducir mensajes sin
+  cotizar candidatos dudosos.
+- Hallazgos del análisis agregado de conversaciones (hecho en memoria por
+  Codex, sin exportar mensajes): «hemograma», «procalcitonina», «anti TPO» y
+  «calcio» hoy no se identifican con seguridad, y la búsqueda de
+  «helicobacter» omite el 287. Con este flujo esos casos piden confirmación
+  o pasan a una persona; se resolverán con alias revisados, no cargando los
+  conteos.
+- Nada se probó todavía con imágenes reales ni contra la API de Anthropic:
+  los tests usan lecturas y búsquedas falsas.
+- Verificación: `npm test` (tests en `src/lib/prescription/`), `npm run lint`,
+  `npm run build`; con una foto autorizada,
+  `npm run prescription:analyze -- foto.jpg`.
+
+### 2026-09-29 — Recetas: confirmación de candidatos y subtotal parcial
+
+- Fallo observado en una orden manuscrita: el lector agrupó dos exámenes
+  independientes unidos por «+» en una sola lectura. La búsqueda difusa de la
+  frase combinada favoreció una variante cualitativa de PCR; una búsqueda en
+  Supabase posterior de cada componente por separado dio candidatos ambiguos,
+  así que no se debe aceptar aquella variante como identificación válida.
+- La lista actualizada asigna códigos distintos a algunas filas respecto al
+  catálogo cargado. La búsqueda se hace por nombre, no por el número mostrado
+  en Excel; se debe sincronizar el catálogo con la lista vigente antes de
+  depender de códigos nuevos. No se modificó Supabase en esta revisión.
+- El prompt ahora pide emitir una lectura por cada examen independiente
+  separado por «+», «y» o comas. Los candidatos difusos por debajo de 60% piden
+  confirmación sin seleccionar un candidato.
+- Cuando la imagen tiene calidad suficiente, los exámenes identificados con
+  confianza se cotizan en un subtotal parcial aunque otros queden pendientes.
+  El mensaje distingue el subtotal del total y excluye las opciones no
+  confirmadas. Una imagen global de baja calidad sigue bloqueando cotizaciones.
+- Verificación: tests unitarios de separación instruida, candidatos difusos,
+  cotización parcial y bloqueo por imagen de baja calidad. No se volvió a
+  llamar al proveedor de visión ni se escribieron datos en Supabase.
+
+### 2026-09-28 — Prioridad funcional: cotización desde recetas
+
+- Requisito de producto confirmado: la función central futura es leer imágenes
+  de recetas y cotizar los exámenes que aparezcan seleccionados (tick,
+  resaltado o círculo), no construir primero una web ni depender del análisis
+  de conversaciones históricas.
+- La cotización debe usar Precio Paciente por ahora e incluir, para cada
+  examen, tipo de muestra, instrucciones de toma/preparación y las condiciones
+  relevantes del paciente. Si la lectura o la identificación tiene menos de
+  60% de confianza, pedir confirmación antes de cotizar. El 60% es provisional
+  y debe calibrarse con imágenes reales autorizadas; no reutilizar sin validar
+  el umbral de búsqueda difusa textual.
+- El análisis agregado de conversaciones y los alias son mecanismos
+  complementarios para consultas difíciles y desambiguación. No se implementó
+  lectura de imágenes, worker ni envío de mensajes en este cambio.
+- Verificación futura: pruebas con recetas con selecciones marcadas de las
+  tres formas, múltiples exámenes/variantes, instrucciones de muestra y casos
+  por debajo y por encima del umbral de confianza; las de baja confianza deben
+  solicitar confirmación y no emitir una cotización definitiva.
 
 ### 2026-09-28 — Primera carga real del catálogo
 
