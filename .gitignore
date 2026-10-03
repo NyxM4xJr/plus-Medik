@@ -19,4 +19,6 @@ supabase/.temp/
 /*.webp
 /*.heic
 /*.pdf
+/*.rar
+/*.zip
 /imgsPrueba/
