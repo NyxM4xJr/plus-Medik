@@ -100,3 +100,15 @@ describe('composeReply', () => {
     expect(composeReply(await analyzePrescription(input, fakeDeps(INDEX)))).toContain(expected);
   });
 });
+
+describe('composeReply: imagen de baja calidad', () => {
+  it('nombra lo identificado sin precio y pide otra foto; no dice que falta en el catálogo', async () => {
+    const analysis = await analyzePrescription(reading([exam('Glucosa')], { image_quality: 0.4 }), fakeDeps(INDEX));
+    const text = composeReply(analysis);
+
+    expect(text).toContain('Estos sí los identificamos:');
+    expect(text).toContain('foto más clara');
+    expect(text).not.toContain('no lo encontramos en nuestro catálogo');
+    expect(text).not.toContain('Bs');
+  });
+});

@@ -58,6 +58,8 @@ async function run(files: string[], outcomes: Record<number, ReadOutcome | Error
     ...fakeDeps({ glucosa: [candidate('glu')], tsh: [candidate('tsh')] }),
     dir: 'imgs',
     minConfidence: 0.6,
+    provider: 'openai',
+    catalogFingerprint: async () => 'a'.repeat(64),
     stamp: '202609290300',
     listDir: async () => files,
     readFile: async () => new Uint8Array([1]),
@@ -71,6 +73,11 @@ async function run(files: string[], outcomes: Record<number, ReadOutcome | Error
 }
 
 const ONE: ReadOutcome = { ok: true, model: 'gpt-5-mini', reading: reading([exam('Glucosa')]) };
+const LOW_IMAGE: ReadOutcome = {
+  ok: true,
+  model: 'gpt-5-mini',
+  reading: reading([exam('Glucosa')], { image_quality: 0.4 }),
+};
 const TWO: ReadOutcome = {
   ok: true,
   model: 'gpt-5-mini',
@@ -87,9 +94,40 @@ describe('runBatchCommand', () => {
     expect(text).toContain('Decisiones: quote 1, confirm 1; errores 0');
     expect(text).toContain('Exámenes leídos: 3 (identificados 2, por confirmar 0, no identificados 1)');
     expect([...written.keys()]).toEqual([
+      'imgs/resultados/lecturas-202609290300.json',
       'imgs/resultados/revision-202609290300.csv',
       'imgs/resultados/reporte-202609290300.txt',
     ]);
+  });
+
+  it('guarda la lectura cruda validada y el modelo en JSON', async () => {
+    const { written } = await run(['a.jpeg'], { 1: ONE });
+    const snapshot = JSON.parse(written.get('imgs/resultados/lecturas-202609290300.json') as string);
+
+    expect(snapshot).toMatchObject({
+      schemaVersion: 2,
+      provider: 'openai',
+      catalogFingerprint: 'a'.repeat(64),
+      readings: [{ id: 'a', files: ['a.jpeg'], ok: true, model: 'gpt-5-mini', reading: ONE.reading }],
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(/"data"|base64,/i);
+  });
+
+  it('guarda todas las páginas relativas del grupo sin copiar bytes de las imágenes', async () => {
+    const { written } = await run(['prueba7-1.jpeg', 'prueba7-2.jpeg'], { 2: TWO });
+    const snapshot = JSON.parse(written.get('imgs/resultados/lecturas-202609290300.json') as string);
+    expect(snapshot.readings[0]).toMatchObject({
+      id: 'prueba7',
+      files: ['prueba7-1.jpeg', 'prueba7-2.jpeg'],
+      reading: TWO.reading,
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(/data:|base64,/i);
+  });
+
+  it('incluye el código candidato en la planilla aunque la imagen impida cotizar', async () => {
+    const { written } = await run(['a.jpeg'], { 1: LOW_IMAGE });
+    const rows = (written.get('imgs/resultados/revision-202609290300.csv') as string).split('\r\n');
+    expect(rows[1]).toContain(';identificado;exact;380;GLUCOSA;');
   });
 
   it('la planilla trae BOM, «;» y columnas vacías para el revisor', async () => {
@@ -116,6 +154,8 @@ describe('runBatchCommand', () => {
     expect(code).toBe(EXIT_OK);
     expect(text).toContain('2/2 b: error');
     expect(written.get('imgs/resultados/revision-202609290300.csv')).toContain('b;b-1.jpeg + b-2.jpeg;error');
+    const snapshot = JSON.parse(written.get('imgs/resultados/lecturas-202609290300.json') as string);
+    expect(snapshot.readings[1]).toMatchObject({ id: 'b', ok: false });
   });
 
   it('si fallan todas, termina con error', async () => {

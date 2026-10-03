@@ -95,6 +95,7 @@ describe('analyzePrescription: umbral de confianza (60% provisional)', () => {
     );
 
     expect(analysis.decision).toBe('confirm');
+    expect(analysis.identificationMatches).toBe(2);
     expect(analysis.quote).toBeNull();
     expect(analysis.partialQuote?.lines.map((line) => line.code)).toEqual(['170']);
     expect(analysis.questions.map((question) => question.exams)).toEqual([['TSH'], ['TSH']]);
@@ -129,7 +130,9 @@ describe('analyzePrescription: umbral de confianza (60% provisional)', () => {
       fakeDeps(INDEX),
     );
 
-    expect(analysis).toMatchObject({ decision: 'confirm', lowImageQuality: true, quote: null });
+    expect(analysis).toMatchObject({ decision: 'confirm', lowImageQuality: true, quote: null, partialQuote: null });
+    // El código se conserva para la planilla de revisión aunque no se cotice.
+    expect(analysis.exams[0]).toMatchObject({ status: 'identified', labTestCode: '380' });
   });
 });
 
@@ -330,7 +333,12 @@ describe('identify: por contenido sobre todo el catálogo', () => {
   it('en el análisis, lo identificado por contenido se cotiza', async () => {
     const analysis = await analyzePrescription(reading([exam('Hemograma')]), fakeDeps(INDEX));
     expect(analysis.decision).toBe('quote');
-    expect(analysis.exams[0]).toMatchObject({ status: 'identified', basis: 'contained', labTestName: 'HEMOGRAMA COMPLETO' });
+    expect(analysis.exams[0]).toMatchObject({
+      status: 'identified',
+      basis: 'contained',
+      labTestName: 'HEMOGRAMA COMPLETO',
+      labTestCode: '108',
+    });
   });
 });
 

@@ -16,6 +16,7 @@ import { searchLabCatalog } from '@/lib/catalog/search';
 import { PRESCRIPTION_SEARCH_LIMIT } from '@/lib/prescription/analyze';
 import { parseMinConfidence } from '@/lib/prescription/analyze-command';
 import { EXIT_FAILED, parseBatchArgs, runBatchCommand } from '@/lib/prescription/batch-command';
+import { createSupabaseCatalogFingerprint } from '@/lib/prescription/catalog-fingerprint';
 import { createReaderFromEnv } from '@/lib/prescription/providers';
 import { createSupabaseCatalogOptions, createSupabaseLabTestDetails } from '@/lib/prescription/supabase-details';
 
@@ -49,6 +50,8 @@ console.log(`Proveedor: ${selected.provider}`);
 const exitCode = await runBatchCommand({
   dir: args.dir,
   minConfidence: minConfidence.value,
+  provider: selected.provider,
+  catalogFingerprint: createSupabaseCatalogFingerprint(supabase),
   stamp: new Date().toISOString().slice(0, 16).replace(/[-:T]/g, ''),
   listDir: (dir) => readdir(dir),
   readFile: async (path) => new Uint8Array(await readFile(path)),

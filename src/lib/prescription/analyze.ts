@@ -135,6 +135,8 @@ export interface AnalyzedExam {
   labTestId: string | null;
   /** Nombre en el catálogo del examen de labTestId. */
   labTestName: string | null;
+  /** Código en el catálogo de labTestId; se conserva aunque la calidad de imagen impida cotizar. */
+  labTestCode: string | null;
   /** Con needs_confirmation por varias opciones: las variantes a elegir. */
   options: CatalogOption[];
 }
@@ -163,6 +165,8 @@ export type Decision =
 
 export interface PrescriptionAnalysis {
   decision: Decision;
+  /** Entradas que identify() emparejó sin ambigüedad, antes de umbrales y deduplicación. */
+  identificationMatches: number;
   minConfidence: number;
   imageQuality: number;
   lowImageQuality: boolean;
@@ -299,6 +303,7 @@ function analyzeExam(
     identificationConfidence: identification,
     confidence: Math.min(exam.confidence, identification),
     basis: result.basis,
+    labTestCode: result.status === 'matched' && result.match ? result.match.code : null,
   };
 
   if (result.status === 'matched' && result.match) {
@@ -370,6 +375,7 @@ export async function analyzePrescription(
   const minConfidence = options.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
   const lowImageQuality = reading.image_quality < minConfidence;
   const empty = {
+    identificationMatches: 0,
     minConfidence,
     imageQuality: reading.image_quality,
     lowImageQuality,
@@ -388,6 +394,7 @@ export async function analyzePrescription(
   const results = await Promise.all(
     reading.exams.map((exam) => identify(deps.search, catalog, exam.text, exam.interpretation)),
   );
+  const identificationMatches = results.filter((result) => result.status === 'matched').length;
   let exams = dedupe(reading.exams.map((exam, index) => analyzeExam(exam, results[index], minConfidence)));
   const identifiedIds = exams
     .filter((exam) => exam.status === 'identified' && exam.labTestId !== null)
@@ -397,19 +404,27 @@ export async function analyzePrescription(
   );
 
   // Un examen que desapareció o se desactivó entre la búsqueda y la cotización no se cotiza.
-  const missing = exams.filter(
-    (exam) => exam.status === 'identified' && exam.labTestId !== null && !details.has(exam.labTestId),
-  );
+  // Con imagen de baja calidad no se piden detalles: no se cotiza, pero se conserva lo identificado.
+  const missing = lowImageQuality
+    ? []
+    : exams.filter((exam) => exam.status === 'identified' && exam.labTestId !== null && !details.has(exam.labTestId));
   if (missing.length > 0) {
     const missingIds = new Set(missing.map((exam) => exam.labTestId));
     exams = exams.map((exam) =>
       exam.labTestId !== null && missingIds.has(exam.labTestId)
-        ? { ...exam, status: 'not_identified' as const, reason: 'not_in_catalog' as const, labTestId: null, labTestName: null }
+        ? {
+            ...exam,
+            status: 'not_identified' as const,
+            reason: 'not_in_catalog' as const,
+            labTestId: null,
+            labTestName: null,
+            labTestCode: null,
+          }
         : exam,
     );
   }
 
-  const lines: QuoteLine[] = exams
+  const lines: QuoteLine[] = (lowImageQuality ? [] : exams)
     .filter((exam) => exam.status === 'identified' && exam.labTestId !== null)
     .map((exam) => {
     const test = details.get(exam.labTestId as string) as LabTestDetails;
@@ -432,6 +447,7 @@ export async function analyzePrescription(
     const partialQuote = !lowImageQuality && lines.length > 0 ? { lines, totalBs } : null;
     return {
       ...empty,
+      identificationMatches,
       decision: 'confirm',
       exams,
       quote: null,
@@ -442,6 +458,7 @@ export async function analyzePrescription(
 
   return {
     ...empty,
+    identificationMatches,
     decision: 'quote',
     exams,
     quote: { lines, totalBs },

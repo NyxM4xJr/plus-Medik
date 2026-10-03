@@ -2,6 +2,8 @@ import { extname, join } from 'node:path';
 import { analyzePrescription, type PrescriptionAnalysis, type PrescriptionDeps } from '@/lib/prescription/analyze';
 import { formatAnalysis, mediaTypeOf } from '@/lib/prescription/analyze-command';
 import type { ImageMediaType, PrescriptionImage, PrescriptionReader } from '@/lib/prescription/reader';
+import type { PrescriptionReading } from '@/lib/prescription/reading';
+import type { Provider } from '@/lib/prescription/analyze-command';
 import { composeReply } from '@/lib/prescription/reply';
 
 /**
@@ -53,8 +55,47 @@ export function parseBatchArgs(args: readonly string[]): { dir: string } | { err
 }
 
 export type BatchResult =
-  | { id: string; files: string[]; ok: true; model: string; analysis: PrescriptionAnalysis }
+  | {
+      id: string;
+      files: string[];
+      ok: true;
+      model: string;
+      analysis: PrescriptionAnalysis;
+      reviewAnnotations?: ReviewAnnotation[];
+      reviewOnlyExams?: ReviewOnlyExam[];
+    }
+  | { id: string; files: string[]; ok: false; error: string; reviewOnlyExams?: ReviewOnlyExam[] };
+
+export interface ReviewAnnotation {
+  text: string;
+  interpretation: string | null;
+  mark: string;
+  image: number;
+  correct: string | null;
+  correctExam: string | null;
+  catalogCode: string | null;
+  notes: string | null;
+}
+
+export interface ReviewOnlyExam {
+  text: string;
+  interpretation: string | null;
+  correct: string | null;
+  correctExam: string | null;
+  notes: string | null;
+}
+
+export type BatchReadingRecord =
+  | { id: string; files: string[]; ok: true; model: string; reading: PrescriptionReading }
   | { id: string; files: string[]; ok: false; error: string };
+
+export interface BatchReadingsFile {
+  schemaVersion: 2;
+  generatedAt: string;
+  provider?: Provider;
+  catalogFingerprint?: string;
+  readings: BatchReadingRecord[];
+}
 
 const pct = (value: number) => `${Math.round(value * 100)}`;
 
@@ -95,18 +136,26 @@ export function reviewCsv(results: readonly BatchResult[]): string {
     const images = result.files.join(' + ');
     if (!result.ok) {
       rows.push([result.id, images, 'error', null, null, null, null, null, null, result.error, null, null, null, null, null, null, null]);
+      rows.push(...reviewOnlyRows(result, 'error', null));
       continue;
     }
     const { analysis } = result;
     const head = [result.id, images, analysis.decision, pct(analysis.imageQuality)];
     if (analysis.exams.length === 0) {
       rows.push([...head, null, null, null, null, null, null, null, null, null, null, null, null, analysis.issues.join('; ') || null]);
+      rows.push(...reviewOnlyRows(result, analysis.decision, pct(analysis.imageQuality)));
       continue;
     }
+    const annotations = new Map<string, ReviewAnnotation[]>();
+    for (const annotation of result.reviewAnnotations ?? []) {
+      const key = reviewKey(annotation);
+      annotations.set(key, [...(annotations.get(key) ?? []), annotation]);
+    }
     for (const exam of analysis.exams) {
-      const code = exam.labTestId
-        ? (analysis.quote ?? analysis.partialQuote)?.lines.find((line) => line.labTestId === exam.labTestId)?.code ?? null
-        : null;
+      const key = reviewKey(exam);
+      const annotation = annotations.get(key)?.shift();
+      // Un «sí/no» juzgó el código que vio el revisor: si cambió, no se arrastra.
+      const staleMark = annotation?.correct != null && annotation.catalogCode !== exam.labTestCode;
       rows.push([
         ...head,
         exam.text,
@@ -116,16 +165,51 @@ export function reviewCsv(results: readonly BatchResult[]): string {
         pct(exam.readingConfidence),
         exam.status === 'identified' ? 'identificado' : exam.reason,
         exam.basis,
-        code,
+        exam.labTestCode,
         exam.labTestName,
         exam.options.map((option) => `${option.code ?? '?'} ${option.name}`).join(' | ') || null,
-        null,
-        null,
-        null,
+        staleMark ? null : annotation?.correct ?? null,
+        annotation?.correctExam ?? null,
+        staleMark ? staleMarkNote(annotation) : annotation?.notes ?? null,
       ]);
     }
+    rows.push(...reviewOnlyRows(result, analysis.decision, pct(analysis.imageQuality)));
   }
   return '﻿' + [REVIEW_HEADER, ...rows].map((row) => row.map(cell).join(';')).join('\r\n') + '\r\n';
+}
+
+function reviewOnlyRows(
+  result: BatchResult,
+  decision: string,
+  imageQuality: string | number | null,
+): Array<Array<string | number | null>> {
+  if (!result.reviewOnlyExams?.length) return [];
+  const head = [result.id, result.files.join(' + '), decision, imageQuality];
+  return result.reviewOnlyExams.map((exam) => [
+    ...head,
+    exam.text,
+    exam.interpretation,
+    null,
+    null,
+    null,
+    'omitido_por_lector',
+    null,
+    null,
+    null,
+    null,
+    exam.correct ?? null,
+    exam.correctExam ?? null,
+    exam.notes ?? null,
+  ]);
+}
+
+function staleMarkNote(annotation: ReviewAnnotation): string {
+  const note = `revisar: cambió el código (antes ${annotation.catalogCode ?? 'sin código'}, marcado «${annotation.correct}»)`;
+  return annotation.notes ? `${annotation.notes} | ${note}` : note;
+}
+
+function reviewKey(exam: Pick<ReviewAnnotation, 'text' | 'interpretation' | 'mark' | 'image'>): string {
+  return JSON.stringify([exam.text, exam.interpretation, exam.mark, exam.image]);
 }
 
 export function reportText(results: readonly BatchResult[]): string {
@@ -149,6 +233,7 @@ export interface BatchSummary {
   errores: number;
   decisiones: Record<string, number>;
   examenes: number;
+  identificationMatches: number;
   identificados: number;
   porConfirmar: number;
   noIdentificados: number;
@@ -164,6 +249,7 @@ export function summarize(results: readonly BatchResult[]): BatchSummary {
     errores: results.length - ok.length,
     decisiones,
     examenes: exams.length,
+    identificationMatches: ok.reduce((sum, analysis) => sum + analysis.identificationMatches, 0),
     identificados: exams.filter((exam) => exam.status === 'identified').length,
     porConfirmar: exams.filter((exam) => exam.status === 'needs_confirmation').length,
     noIdentificados: exams.filter((exam) => exam.status === 'not_identified').length,
@@ -173,6 +259,8 @@ export function summarize(results: readonly BatchResult[]): BatchSummary {
 export interface BatchCommandDeps extends PrescriptionDeps {
   dir: string;
   minConfidence: number;
+  provider: Provider;
+  catalogFingerprint: () => Promise<string>;
   /** Sufijo de los archivos de salida, por ejemplo la fecha y hora. */
   stamp: string;
   listDir: (dir: string) => Promise<string[]>;
@@ -182,8 +270,14 @@ export interface BatchCommandDeps extends PrescriptionDeps {
   write: (line: string) => void;
 }
 
-async function analyzeGroup(group: ImageGroup, deps: BatchCommandDeps): Promise<BatchResult> {
-  const fail = (error: string): BatchResult => ({ id: group.id, files: group.files, ok: false, error });
+async function analyzeGroup(
+  group: ImageGroup,
+  deps: BatchCommandDeps,
+): Promise<{ result: BatchResult; reading: BatchReadingRecord }> {
+  const fail = (error: string): { result: BatchResult; reading: BatchReadingRecord } => ({
+    result: { id: group.id, files: group.files, ok: false, error },
+    reading: { id: group.id, files: group.files, ok: false, error },
+  });
   const message = (error: unknown) => (error instanceof Error ? error.message : 'desconocido');
 
   let images: PrescriptionImage[];
@@ -206,11 +300,22 @@ async function analyzeGroup(group: ImageGroup, deps: BatchCommandDeps): Promise<
   }
   if (!outcome.ok) return fail(`lectura no completada (${outcome.reason}): ${outcome.detail}`);
 
+  const reading: BatchReadingRecord = {
+    id: group.id,
+    files: group.files,
+    ok: true,
+    model: outcome.model,
+    reading: outcome.reading,
+  };
+
   try {
     const analysis = await analyzePrescription(outcome.reading, deps, { minConfidence: deps.minConfidence });
-    return { id: group.id, files: group.files, ok: true, model: outcome.model, analysis };
+    return { result: { id: group.id, files: group.files, ok: true, model: outcome.model, analysis }, reading };
   } catch (error) {
-    return fail(`falló la búsqueda en el catálogo: ${message(error)}`);
+    return {
+      result: { id: group.id, files: group.files, ok: false, error: `falló la búsqueda en el catálogo: ${message(error)}` },
+      reading,
+    };
   }
 }
 
@@ -233,27 +338,49 @@ export async function runBatchCommand(deps: BatchCommandDeps): Promise<number> {
 
   write('DRY-RUN: análisis por lotes. No se escribe en la base ni se envía ningún mensaje.');
   write(`Cotizaciones: ${groups.length} (${groups.reduce((n, g) => n + g.files.length, 0)} imágenes)`);
+  let catalogFingerprint: string;
+  try {
+    catalogFingerprint = await deps.catalogFingerprint();
+  } catch (error) {
+    write(`Error: no se pudo calcular la huella del catálogo: ${error instanceof Error ? error.message : 'desconocido'}`);
+    return EXIT_FAILED;
+  }
 
   const results: BatchResult[] = [];
+  const readings: BatchReadingRecord[] = [];
   // En serie: evita límites de velocidad de la API y deja el progreso legible.
   for (const [index, group] of groups.entries()) {
-    const result = await analyzeGroup(group, deps);
-    results.push(result);
-    write(`  ${index + 1}/${groups.length} ${group.id}: ${result.ok ? result.analysis.decision : 'error'}`);
+    const processed = await analyzeGroup(group, deps);
+    results.push(processed.result);
+    readings.push(processed.reading);
+    write(
+      `  ${index + 1}/${groups.length} ${group.id}: ${processed.result.ok ? processed.result.analysis.decision : 'error'}`,
+    );
   }
 
   const outDir = join(deps.dir, 'resultados');
+  const readingsPath = join(outDir, `lecturas-${deps.stamp}.json`);
   const csvPath = join(outDir, `revision-${deps.stamp}.csv`);
   const reportPath = join(outDir, `reporte-${deps.stamp}.txt`);
+  const batchReadings: BatchReadingsFile = {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    provider: deps.provider,
+    catalogFingerprint,
+    readings,
+  };
+  await deps.writeFile(readingsPath, `${JSON.stringify(batchReadings, null, 2)}\n`);
   await deps.writeFile(csvPath, reviewCsv(results));
   await deps.writeFile(reportPath, reportText(results));
 
   const s = summarize(results);
   write('');
   write(`Decisiones: ${Object.entries(s.decisiones).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}; errores ${s.errores}`);
+  write(`Coincidencias sin ambigüedad de identify(): ${s.identificationMatches}`);
   write(
     `Exámenes leídos: ${s.examenes} (identificados ${s.identificados}, por confirmar ${s.porConfirmar}, no identificados ${s.noIdentificados})`,
   );
+  write(`Lecturas crudas: ${readingsPath}`);
   write(`Planilla de revisión: ${csvPath}`);
   write(`Reporte con borradores: ${reportPath}`);
 
