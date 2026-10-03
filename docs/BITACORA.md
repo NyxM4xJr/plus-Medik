@@ -376,6 +376,15 @@ Orden de decisión (el primero que decide, gana):
   (TSH, Vitamina D, PCR, LDH, Anti-tiroglobulina, HIV); nombres distintos
   («glicemia» → GLUCOSA, «PPF» → parasitológico seriado); perfiles que son
   varios exámenes («perfil lipídico», «hepatograma»).
+- **Variantes por defecto decididas por el laboratorio** (2026-10-01, **sin
+  implementar**; entran con las reglas 1–4):
+  - TSH sin técnica → TSH (ECLIA) (178).
+  - Vitamina D sin técnica → VITAMINA D 25 (OH) (ECLIA) (538). Se entiende
+    25-OH; la 1,25 dihidroxi (537) es otro examen y solo si el médico la
+    nombra.
+  - «Quimioluminiscencia» escrito en la orden = ECLIA.
+  - En una orden impresa, cuenta como pedido lo **resaltado**; un círculo de
+    tinta alrededor de un grupo no basta.
 
 ### Auditoría: qué revisar cuando cambie esta lógica
 
@@ -413,8 +422,10 @@ Código: `src/lib/prescription/analyze.ts`, `preparation.ts` y `reply.ts`.
   calidad alcanza el umbral, la respuesta puede mostrar como **subtotal
   parcial** solo los exámenes identificados con confianza y pedir aclaración
   para el resto. Nunca elige un candidato dudoso ni incluye su precio. Una
-  imagen de calidad global baja bloquea incluso el subtotal. Además `retake`
-  (sin exámenes e imagen mala), `not_lab_order` y `no_exams`.
+  imagen de calidad global baja bloquea incluso el subtotal: los exámenes
+  identificados siguen `identified` (con código), la respuesta los nombra sin
+  precio y pide otra foto. Además `retake` (sin exámenes e imagen mala),
+  `not_lab_order` y `no_exams`.
 - Un mismo examen leído dos veces cuenta una vez. Un examen que se desactiva
   entre la búsqueda y la cotización no se cotiza.
 - Cotización: Precio Paciente (`price_bs`), tipo de muestra, preparación y
@@ -454,11 +465,18 @@ npm run prescription:analyze -- ruta/foto1.jpg [ruta/foto2.jpg ...]
 
 ```bash
 npm run prescription:batch -- imgsPrueba
+npm run prescription:reanalyze -- imgsPrueba/resultados/lecturas-<fecha>.json
+npm run prescription:reanalyze -- imgsPrueba/resultados/revision-202609290647.csv
+npm run prescription:reanalyze -- imgsPrueba/resultados/lecturas-<fecha>.json --review imgsPrueba/resultados/revision-<fecha>.csv
 ```
 
 - Analiza en DRY-RUN todas las imágenes de una carpeta. «pruebaX-1.jpeg» y
   «pruebaX-2.jpeg» son la misma cotización. En serie, un error en una
   cotización no detiene las demás.
+- Guarda también `lecturas-<fecha>.json`: `schemaVersion: 2`, proveedor,
+  huella SHA-256 del catálogo activo, transcripción validada por cotización,
+  nombre del modelo y archivos relativos de imagen. No guarda imágenes ni bytes.
+  El reanalizador acepta también snapshots legacy `version: 1`.
 - Deja en `<carpeta>/resultados/` una planilla `revision-<fecha>.csv` («;» y
   BOM, abre en Excel en español) con una fila por examen leído y columnas
   vacías `correcto_si_no`, `examen_correcto` y `notas` para el revisor; los
@@ -468,9 +486,51 @@ npm run prescription:batch -- imgsPrueba
   ignorada (`imgsPrueba/` lo está): contiene recetas y resultados de pacientes.
 - La planilla revisada es el set de prueba para medir cada cambio de prompt,
   alias o umbral antes de aceptarlo.
+- `prescription:reanalyze` acepta el JSON guardado, una planilla CSV anterior o
+  ambos juntos (`lecturas.json --review revision.csv`).
+  El CSV reconstruye texto, interpretación, marca, página, confianza y calidad
+  de imagen; los porcentajes están redondeados y no puede recuperar `issues`
+  de lectura que no están en esa planilla.
+  No llama al modelo; consulta el catálogo en Supabase y advierte si falta la
+  huella o si cambió.
+- En el modo combinado, las lecturas proceden del JSON y las anotaciones del
+  CSV; cualquier anotación sin lectura correspondiente se lista explícitamente.
+  Una fila agregada sin marca o imagen se considera un examen omitido por el
+  lector y se conserva separada de la lectura. Un error de lectura individual
+  se conserva como error de su cotización y no detiene las demás.
+- El evaluador usa `examen_correcto` solo si contiene un código existente en
+  `lab_tests` (activo o inactivo).
+  Si falta, `correcto_si_no` se usa únicamente cuando el código anterior
+  coincide con el código actual; si cambió, queda pendiente. Códigos manuales
+  inválidos se listan. La planilla muestra el código candidato aunque la imagen
+  sea de baja calidad.
+- Se evalúan todos los exámenes `identified`, también los de imagen de baja
+  calidad: no llevan precio, pero la respuesta se los nombra al paciente.
+- La planilla reanalizada no arrastra un `correcto_si_no` cuyo código cambió:
+  lo deja vacío y anota en `notas` el código anterior y la marca, para volver
+  a revisar. `examen_correcto` se conserva siempre.
+- Examen agregado por el revisor = fila con `marca` **e** `imagen` vacías. Si
+  falta solo una de las dos, la importación se rechaza con la línea (es una
+  celda borrada de una lectura original). Los agregados se conservan también
+  en cotizaciones con error o sin exámenes leídos, en cualquier orden de filas.
+- La huella cubre datos, no código: un cambio en `identify()` o en las
+  funciones SQL de búsqueda no la altera (eso es justamente lo que se mide).
 
 ## Pendientes
 
+- **CRÍTICO — Formularios impresos con casillas: la IA se corre de renglón.**
+  En la primera medición con revisión humana (registro 2026-10-01) los 6
+  cotizados equivocados salieron de formularios impresos con casillas
+  pequeñas; en 5 la IA tomó el renglón vecino de uno marcado («Fosfatasa
+  alcalina» por «GGT», «Calcio sérico» por «Creatinina»). En las órdenes
+  escritas a mano no hubo ningún error. En esos mismos formularios la IA
+  además omitió la mayoría de los 30 exámenes que no vio. Mientras no se
+  resuelva, **no se puede cotizar automáticamente un formulario con
+  casillas**. Primero se busca una solución en software (medida con
+  `lecturas-202610010442.json` y la revisión ya hecha, indicador = 0); si no
+  la hay, se resuelve con una persona (por ejemplo, que estos formularios
+  siempre pasen a un asesor). Decisión del responsable del proyecto: es
+  crítico.
 - **Función principal futura: cotizar recetas desde imágenes.** El agente debe
   identificar los exámenes seleccionados en la receta (marcados con tick,
   resaltados o encerrados), buscar sus variantes en el catálogo y preparar la
@@ -517,7 +577,10 @@ npm run prescription:batch -- imgsPrueba
   (`drop table public.lab_tests_backup_20260928;`) o activarle RLS.
 - **Tarifa que cotiza el agente.** Por ahora, Precio Paciente (`price_bs`)
   para todos. Falta definir si alguna conversación usa otra tarifa y cómo se
-  decide.
+  decide. Ojo: Médicos y Emergencia están cargadas con decimales (p. ej.
+  157,14 y 176,47 para 168), mientras la lista Excel las muestra redondeadas
+  (157 y 176); Paciente y Convenio son enteras. Si se cotizan esas tarifas,
+  decidir si se redondean (verificado 2026-10-01, códigos 168–180).
 - **Probar la concurrencia de la carga** con dos sesiones reales en un entorno
   de pruebas.
 
@@ -540,6 +603,248 @@ npm run prescription:batch -- imgsPrueba
 - **Sin limpieza de `webhook_attribution_debug`**, aunque tiene `expires_at`.
 
 ## Registro
+
+### 2026-10-03 — Octb2: el plan de solo precios cambia 7 exámenes (dry-run)
+
+- **Corrige la entrada del 2026-10-02:** la conciliación por nombre
+  normalizado da 7 exámenes con tarifas distintas, no uno; y son 3 los
+  códigos del catálogo sin fila en la lista (193, 194 y una de las dos
+  Ferritinas, 390 o 391), no uno. La lista trae además 2 exámenes nuevos
+  (Homocisteína y Látex FR cuantitativo FIA).
+- El CSV de esa entrada (`catalogo-plusmedik-octb2-reconciliado-utf8.csv`)
+  solo cambia el 126: está incompleto. **No usarlo.**
+- CSV nuevo, privado: `.catalog-private/catalogo-octb2-solo-precios-utf8.csv`
+  (542 filas; conserva códigos, nombres, muestras y notas; solo cambia
+  tarifas donde el nombre coincide de forma exacta y única).
+- `catalog:plan` con ese CSV: 0 `create`, 7 `update`, 535 `unchanged`,
+  0 `deactivate`, 0 bloqueadas, 0 conflictos; salida 0. Cambian 126 y 411
+  (las cuatro tarifas) y 416, 417, 418, 419 y 518 (Paciente y Emergencia).
+  `lab_tests` se releyó antes: idéntico a la exportación del 2026-10-02.
+- **No se aplicó.** Falta `catalog:apply --apply`, que corre el responsable
+  del proyecto en su terminal; después, `catalog:plan` debe dar 542
+  `unchanged`.
+- Aviso para el laboratorio (no bloquea): en 416–419 la tarifa Médicos quedó
+  fija y ahora es menor que Paciente; en 518 quedó mayor.
+- Pendiente para una segunda carga, con respuesta del laboratorio:
+  desactivar 193 y 194, las dos Ferritinas, códigos para los 2 exámenes
+  nuevos (nunca su «Nro.» de la lista), cambios de nombre en 312, 313 y 534,
+  y muestra de 410 y 453.
+- Aviso: `imgsPrueba.rar` está en la raíz del repo público sin ignorar y
+  contiene recetas. Ignorarlo o moverlo antes del próximo commit.
+
+### 2026-10-02 — Lista Octb2: tarifas prioritarias y revisión de códigos
+
+- La lista actualizada es la fuente de verdad para las cuatro tarifas. El
+  archivo de comparación de perfiles sirve para revisar composiciones; sus
+  precios anteriores no sustituyen los de la lista.
+- Se conservan los códigos actuales. Solo se propone cambiar tarifas cuando
+  coinciden el código y el nombre normalizado del examen. No se reasignan
+  códigos ni se fusionan variantes por nombre; las demás diferencias quedan
+  para revisión manual.
+- Comparación de solo lectura: 541 filas numeradas en la lista, 542 exámenes
+  con código en el catálogo y 192 coincidencias exactas de código y nombre.
+  Hay 339 nombres exactos bajo otro código y 10 sin coincidencia exacta; un
+  código del catálogo no aparece en la lista. No se preparó una importación
+  completa porque la numeración no identifica de forma segura los exámenes.
+- La propuesta conservadora conserva las filas actuales y produce un plan con
+  una actualización de tarifa, 541 filas sin cambios y ninguna creación ni
+  desactivación. El plan es dry-run; no se escribieron datos en Supabase.
+  Reportes y propuesta quedan en `.catalog-private/`.
+
+### 2026-10-01 — HIV prueba rápida confirmada; pregunta de perfil tiroideo
+
+- El laboratorio confirma: **451 «H.I.V 1,2» es la prueba rápida** (por
+  inmunocromatografía). Sigue pendiente el alias «HIV» hacia todas sus
+  variantes y, si el laboratorio quiere, renombrarla con «(PRUEBA RAPIDA)».
+- Perfil andropausia (177) = Testosterona total + Testosterona libre + SHBG,
+  como dice su nombre. Sigue sin respuesta si se cotiza el perfil (330 Bs)
+  cuando la orden pide los tres por separado (440 Bs).
+- Se envió al laboratorio una pregunta de casos para el perfil tiroideo
+  (qué cotizar con «perfil tiroideo» solo, con «TSH - T3 - T4», con T3/T4 sin
+  «libre» ni «total», y si existe precio de perfil). Pendiente la respuesta.
+
+### 2026-10-01 — Corrección: sí hay HIV prueba rápida (451)
+
+- **Corrige la entrada siguiente:** el catálogo cargado sí tiene una HIV de
+  prueba rápida probable: **451 «H.I.V 1,2»** (SEROLOGIA, 50 Bs, entrega 1
+  hora, junto a HCG cualitativa 452, Hepatitis A y B rápidas 454 y 455 y
+  Dengue test rápido 442). No apareció porque se buscó «HIV» y el nombre
+  lleva puntos. **Pendiente:** que el laboratorio confirme que 451 es la
+  prueba rápida por inmunocromatografía y, si puede, le agregue «(PRUEBA
+  RAPIDA)» al nombre como en Hepatitis A y B.
+- **Fallo de búsqueda:** la receta 6 escribe «HIV» y la IA ofreció solo
+  Western Blot y Elisa; 451 no salió como candidato. Un alias «HIV» → 451
+  (y a las demás variantes HIV, como todo alias genérico) lo resolvería.
+  Revisar al cargar alias si otros nombres con puntos (H.A.I., etc.) tienen
+  el mismo problema.
+- Análisis hecho con Claude web sobre la lista Excel: sus números son el
+  «Nro.» de esa lista (fila), no códigos; desde 193 hay que sumar 2 (449 →
+  451, 496 → 498, 226 → 228). Su advertencia de que las hormonas quedaron
+  como HEMATOLOGIA no aplica al catálogo cargado (las 54 están como
+  HORMONAS); aplica solo a su Excel de perfiles.
+- Perfil tiroideo: leído al pie de la letra, «TSH - T3 - T4» = TSH 178 +
+  T3 total 170 + T4 total 174 (270 Bs); con libres serían 178 + 168 + 172
+  (330 Bs). El revisor omitió la TSH. Sigue pendiente del laboratorio.
+  Perfil andropausia (177) = 330 Bs frente a 440 Bs sueltos (176 + 175 +
+  167): falta que el laboratorio confirme si lo cotiza como perfil cuando
+  la orden pide los tres.
+
+### 2026-10-01 — Respuestas del laboratorio a la revisión
+
+- Reglas de variante por defecto y de marcas: ver «Recetas: identificación en
+  el catálogo» → «Variantes por defecto decididas por el laboratorio». Se
+  aplicaron en `revision-202610010442-revisada.csv` (receta 5 y 9: Vitamina D
+  → 538; TSH → 178; receta 15: «Sangre oculta» sigue siendo error porque no
+  está resaltada). La medición no cambia: correctos 37, cotizados
+  equivocados 6, pendiente 1 (esas reglas tocan exámenes que la IA no había
+  cotizado).
+- Receta 11: la PCR es la cualitativa (475), como dice la orden; el
+  «cuantitativo» del revisor iba con el recuento de plaquetas.
+- Perfil tiroideo (receta 19): la IA lo leyó bien («Perfil Tiroideo (TSH -
+  T3 - T4)»), pero el catálogo no tiene ese perfil y no podía emparejarlo. El
+  revisor lo desglosa en T3 total, T3 libre, T4 total y T4 libre, sin TSH,
+  aunque la orden impresa dice «TSH - T3 - T4». **Pendiente:** el contenido
+  y precio de cada perfil (Excel de perfiles del laboratorio), y si total +
+  libre + SHBG se cotiza como Perfil andropausia (177).
+- HIV (receta 4): está subrayado en una sección de la orden que parece de
+  pruebas rápidas (el encabezado no sale en la foto); el revisor escribió
+  «inmunocromatografía (prueba rápida)». El catálogo tiene HIV solo como
+  228 (Elisa 4ta gen.), 310 y 312 (paneles) y 498 (Western Blot). **Pendiente:**
+  si el laboratorio hace HIV prueba rápida y con qué código.
+- Los números de HIV que dictó el responsable (216, 226, 308, 310, 496) son
+  el «Nro.» de la lista Excel actualizada, no códigos: 226, 308, 310 y 496 son
+  los códigos 228, 310, 312 y 498 del catálogo cargado (corrimiento −2, ya
+  registrado), y el 216 de esa lista es Hepatitis C IgG. Confirma que no se
+  deben usar números de esa lista como códigos.
+
+### 2026-10-01 — Primera medición con revisión humana: 6 cotizados equivocados
+
+- Revisión del personal del laboratorio sobre `revision-sencilla-202610010442.xlsx`,
+  interpretada contra las fotos (el revisor escribió a veces en la fila
+  vecina o en otra columna) y pasada a códigos en
+  `revision-202610010442-revisada.csv` (fuera de git). Medición:
+  `prescription:reanalyze -- lecturas-202610010442.json --review
+  revision-202610010442-revisada.csv`, misma huella `8524ffe0…`.
+- **Identificados 44: correctos 37, cotizados equivocados 6, pendiente 1.**
+  El indicador de la regla 4 no es 0: hoy la identificación **no** pasa el
+  gate.
+- Los 6 errores son de **formularios impresos con casillas** (recetas 9 ×3,
+  11, 14, 15); ninguno de órdenes manuscritas. En 5 la IA tomó el renglón
+  vecino de uno marcado (p. ej. «Fosfatasa alcalina» bajo «GGT», «Calcio
+  sérico» bajo «Creatinina»). En la receta 15 conviven resaltador y círculos
+  azules: el revisor toma solo lo resaltado.
+- **30 exámenes marcados que la IA no vio**, casi todos en formularios con
+  casillas (receta 19: 13; receta 9: 5). En esas órdenes el lector lee
+  parcial.
+- Pendiente (receta 22): «Testosterona libre» (175, única variante del
+  catálogo) marcada «No / no especifica» por el revisor.
+- **Fallo del Excel sencillo:** en recetas de dos fotos la segunda queda
+  junto al bloque siguiente; el revisor anotó en la receta 20 el perfil
+  tiroideo de la 19. Si se regenera, cada foto debe quedar dentro de su
+  bloque.
+- Preguntas para el laboratorio (no decididas): TSH y Vitamina D sin técnica
+  (el revisor eligió ECLIA o FIA en unas recetas y «no especifica» en
+  otras); «quimioluminiscencia» = ECLIA; resaltador o círculo como marca;
+  composición del perfil tiroideo; total + libre + SHBG = Perfil andropausia
+  (177); HIV prueba rápida no existe en el catálogo; BK en orina «no se hace
+  por separado».
+
+### 2026-10-01 — Lecturas congeladas para la revisión humana
+
+- `prescription:batch` sobre las 23 cotizaciones (25 imágenes) de
+  `imgsPrueba/`, `gpt-5-mini-2025-08-07`, umbral 60%. Archivos (fuera de
+  git): `lecturas-202610010442.json` (`schemaVersion` 2, huella
+  `8524ffe0…`, sin bytes de imagen) y `revision-202610010442.csv`.
+- Resultado: confirm 22, no_exams 1, errores 0. 100 exámenes leídos;
+  identificados 44 (14 exactos, 25 por contenido, 5 difusos), por confirmar
+  41, no identificados 15. Ninguna imagen bajo el umbral de calidad (en la
+  corrida del 2026-09-29 había 2).
+- `prescription:reanalyze` sobre ese JSON da exactamente las mismas cifras y
+  la misma huella: el reanálisis es reproducible.
+- **Esta es la base de medición** de aquí en adelante (reemplaza al 46/100,
+  que venía de otra lectura del modelo). Falta la revisión humana de
+  `revision-202610010442.csv` con códigos en `examen_correcto`; después se
+  mide con `prescription:reanalyze -- lecturas-202610010442.json --review
+  <planilla revisada>`.
+- Para el personal del laboratorio se generó una versión sencilla,
+  `revision-sencilla-202610010442.xlsx` (fuera de git, con las fotos
+  incrustadas; 8 giradas solo en el Excel para leerlas derechas). Tiene dos
+  columnas para llenar: «¿La IA acertó?» (Sí / No / No está en la receta,
+  solo en las 44 identificadas) y «Examen correcto», **por nombre**. El
+  «Nro.» de su lista Excel es número de fila, no código: no se piden
+  códigos. Columnas ocultas guardan cotización, lectura y código para
+  devolverla a la planilla técnica.
+- **Pendiente:** convertir la planilla sencilla llenada a la planilla técnica.
+  Cada nombre pasa a código solo si coincide con **un único** examen del
+  catálogo; los demás se listan para que el laboratorio los aclare. Ninguna
+  fila sin revisar cuenta como acierto.
+
+### 2026-10-01 — El 46/100 se reproduce; fallo de imagen de baja calidad
+
+- **Corrige la entrada del 2026-09-30:** el 41/100 no venía del redondeo del
+  CSV sino de un fallo de `analyzePrescription` presente desde `b15d889`.
+  Con imagen de baja calidad no se piden detalles del catálogo, y la
+  comprobación «examen desactivado entre búsqueda y cotización» degradaba
+  todos los identificados a `not_in_catalog`. El borrador decía «no lo
+  encontramos en nuestro catálogo; un asesor lo revisará» y se perdía el
+  código; la rama de `reply.ts` que nombra lo identificado y pide otra foto
+  nunca se ejecutaba.
+- Cambio: con imagen de baja calidad no se hace esa comprobación ni se arman
+  líneas de cotización; los exámenes quedan `identified` con su código. Se
+  descarta el estado `low_image_quality` que se había agregado el 2026-09-30:
+  caía en el mensaje por defecto «no lo encontramos en nuestro catálogo».
+- Reanálisis de `revision-202609290647.csv` contra el catálogo actual (huella
+  `8524ffe0…`): **46 identificados** (12 exactos, 29 por contenido, 5
+  difusos), 12 + 1 preguntas entre variantes, 24 aclaraciones sin opciones,
+  1 lectura baja, 16 no encontrados. Coincide con el registro del 2026-09-29.
+  Los 5 de diferencia con el 41 son de 2 cotizaciones con imagen de baja
+  calidad. El 46/100 queda como base reproducible desde esa planilla (sin
+  huella histórica; los porcentajes del CSV están redondeados).
+- Evaluador: un `sí/no` sin código previo y con código nuevo también queda
+  pendiente por cambio de código; la planilla de salida no arrastra marcas
+  cuyo código cambió. Ver «Recetas: evaluación por lotes».
+- Sigue sin revisión humana: 0 revisados, 46 pendientes. El indicador de
+  cotizados equivocados todavía no sirve como gate de las reglas 1–4.
+- Verificación: `npm test` (571), `npm run lint`, `npm run build`,
+  `git diff --check`; `npm run prescription:reanalyze --
+  imgsPrueba/resultados/revision-202609290647.csv` (solo lectura del
+  catálogo, sin modelo).
+
+### 2026-09-30 — Persistencia de lecturas y comando de reanálisis
+
+- `prescription:batch` guarda cada resultado de lectura validado en
+  `resultados/lecturas-<fecha>.json`, incluso cuando después falla la consulta
+  al catálogo. El snapshot nuevo usa `schemaVersion: 2`, `provider` y huella
+  SHA-256. Las fallas de lectura quedan registradas como fallas, no como
+  lecturas vacías.
+- `prescription:reanalyze` reusa el JSON o importa una planilla CSV histórica
+  sin llamar al modelo. Solo consulta el catálogo; genera planilla y reporte
+  nuevos, y al importar CSV guarda además una copia JSON normalizada. El modo
+  combinado acepta JSON + CSV de revisión; snapshots legacy `version: 1` siguen
+  siendo válidos.
+- La comparación manual usa el código activo `examen_correcto` como verdad.
+  Si no está, `correcto_si_no` solo se aplica cuando el código previo coincide
+  con el nuevo; si el código cambió la fila queda pendiente. Filas añadidas sin
+  marca o imagen se conservan como exámenes omitidos, no lecturas. Errores de
+  una cotización no bloquean el resto del CSV.
+- El código candidato aparece en la planilla aunque una imagen de baja calidad
+  impida cotizar. La huella cubre pruebas activas y alias activos asociados;
+  cambios y ausencia de huella se advierten al reanalizar.
+- La lectura de 100 exámenes que produjo la medición registrada como 24 → 46
+  se reanalizó desde `revision-202609290647.csv` contra el catálogo actual:
+  `identify()` emparejó 47 sin ambigüedad; el análisis dejó 41 identificados
+  tras validar confianza y disponibilidad de detalles. El 46/100 histórico no
+  se reproduce y se descarta como baseline. El 41/100 es una referencia
+  provisional: la planilla redondea porcentajes y usa el catálogo actual sin
+  huella histórica.
+- La planilla de entrada no tiene revisiones manuales: 0 revisados. El indicador
+  de cotizaciones equivocadas no sirve como gate de las reglas 1–4 hasta tener
+  un JSON congelado con huella y su planilla revisada con `examen_correcto`
+  indicado como código del catálogo.
+- Verificación: `npm test`, `npm run lint` y `npm run build`; luego
+  `npm run prescription:reanalyze -- imgsPrueba/resultados/revision-202609290647.csv`
+  para repetir la medición contra el catálogo actual, sin API de lectura ni
+  escrituras a Supabase.
 
 ### 2026-09-29 — Decisiones del laboratorio sobre nombres; propuesta de abreviaturas
 
@@ -607,16 +912,18 @@ npm run prescription:batch -- imgsPrueba
   4 tarifas cargado en Supabase (542 exámenes). La lectura de recetas existe
   solo como comando local (`prescription:analyze`, `prescription:batch`),
   **no está conectada a WhatsApp**.
-- Hecho: identificación por contenido (24 → 46 de 100 exámenes
-  identificados); decisiones del laboratorio registradas arriba; propuesta
-  privada de 53 abreviaturas enviada a revisión.
+- Hecho: identificación por contenido (24 → 46 de 100 exámenes; el 46 se
+  reprodujo con `prescription:reanalyze` el 2026-10-01); decisiones del
+  laboratorio registradas arriba; propuesta privada de 53 abreviaturas
+  enviada a revisión.
 - Siguiente, en este orden, **solo con visto bueno del responsable del
   proyecto**:
   1. Implementar las reglas 1–4 de esta entrada y medirlas con las mismas
      lecturas guardadas (indicador «cotizado equivocado» = 0).
-  2. Hacer que `prescription:batch` guarde las lecturas crudas (JSON) y un
-     comando que las reanalice sin llamar al modelo (el lector no es
-     determinista).
+  2. Infraestructura de reanálisis implementada (2026-09-30, corregida el
+     2026-10-01); antes de usarla como gate, generar un JSON congelado con
+     huella (`prescription:batch`, llama al modelo) y revisar a mano su
+     planilla con códigos verificados en `examen_correcto`.
   3. Carga de alias cuando el laboratorio devuelva la planilla revisada.
   4. Conciliar el Excel «ACTUALIZADO» **por nombre y muestra** contra los
      códigos existentes: el «Nro.» del Excel es número de fila, no código
